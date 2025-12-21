@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -13,5 +14,8 @@ def json_loads(s: str) -> Any:
 
 
 def now_iso() -> str:
-    from datetime import datetime
     return datetime.now().replace(microsecond=0).isoformat()
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
