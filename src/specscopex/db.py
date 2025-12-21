@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .config import get_settings
-from .utils import now_iso, json_dumps
+from .utils import json_dumps, now_iso, utc_now_iso
 
 
 def _connect() -> sqlite3.Connection:
@@ -68,6 +69,24 @@ def ensure_schema() -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_sku ON product_aliases(sku_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_url ON product_aliases(url);")
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS price_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sku_id TEXT NOT NULL,
+            shop TEXT,
+            url TEXT,
+            price_jpy INTEGER,
+            stock_status TEXT,
+            title TEXT,
+            scraped_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            currency TEXT DEFAULT 'JPY',
+            FOREIGN KEY (sku_id) REFERENCES products(sku_id)
+        );
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_price_unique ON price_history(sku_id, url, scraped_at);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_price_sku ON price_history(sku_id);")
 
         conn.execute("""
         CREATE TABLE IF NOT EXISTS llm_audits (
@@ -427,3 +446,107 @@ def find_alias_duplicate(
                 return dict(row)
 
     return None
+
+
+# -------------------------
+# Price history
+# -------------------------
+def list_price_targets(limit: int = 1000) -> list[dict[str, Any]]:
+    """
+    Enumerate alias URLs to be scraped.
+    Only aliases with non-empty URL are returned.
+    """
+
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT sku_id, shop, url
+            FROM product_aliases
+            WHERE url IS NOT NULL AND TRIM(url) != ''
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def insert_price_history(
+    *,
+    sku_id: str,
+    shop: str | None,
+    url: str,
+    price_jpy: int | None,
+    stock_status: str | None,
+    title: str | None,
+    scraped_at: str,
+    currency: str = "JPY",
+) -> None:
+    created_at = utc_now_iso()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO price_history (
+                sku_id, shop, url, price_jpy, stock_status, title, scraped_at, created_at, currency
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(sku_id, url, scraped_at) DO UPDATE SET
+                price_jpy = excluded.price_jpy,
+                stock_status = excluded.stock_status,
+                title = COALESCE(excluded.title, price_history.title),
+                currency = excluded.currency
+            """,
+            (sku_id, shop, url, price_jpy, stock_status, title, scraped_at, created_at, currency),
+        )
+        conn.commit()
+
+
+def get_latest_prices_by_sku(*, sku_id: str) -> list[dict[str, Any]]:
+    """
+    Return the latest price rows per (shop, url).
+    """
+
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            WITH latest AS (
+                SELECT sku_id, shop, url, MAX(scraped_at) AS max_scraped_at
+                FROM price_history
+                WHERE sku_id = ?
+                GROUP BY shop, url
+            )
+            SELECT ph.*
+            FROM price_history ph
+            JOIN latest l
+                ON ph.sku_id = l.sku_id
+               AND ph.url = l.url
+               AND ph.scraped_at = l.max_scraped_at
+               AND (
+                    (ph.shop = l.shop)
+                    OR (ph.shop IS NULL AND l.shop IS NULL)
+               )
+            WHERE ph.sku_id = ?
+            ORDER BY COALESCE(ph.shop, ''), ph.url
+            """,
+            (sku_id, sku_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_price_history(*, sku_id: str, days: int | None = None) -> list[dict[str, Any]]:
+    clauses = ["sku_id = ?"]
+    params: list[Any] = [sku_id]
+
+    if days is not None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).replace(microsecond=0).isoformat()
+        clauses.append("scraped_at >= ?")
+        params.append(cutoff)
+
+    where_clause = " AND ".join(clauses)
+
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM price_history WHERE {where_clause} ORDER BY scraped_at",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
