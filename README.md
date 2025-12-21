@@ -34,3 +34,8 @@ PYTHONPATH=src python -m specscopex.jobs.collect_prices
 ```bash
 PYTHONPATH=src streamlit run app/Home.py
 ```
+
+## 信号機ロジック概要
+- 各SKUの最新価格から「在庫あり」を優先して最安の代表値を決定
+- 30日履歴で最安・平均・7日傾向（線形回帰の傾き）を算出
+- 最安差3%以内かつ平均以下で Buy、平均±5%は Check、平均+8%以上または上昇傾向は Wait
