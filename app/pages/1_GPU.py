@@ -11,7 +11,6 @@ from specscopex.db import (
     list_products,
 )
 
-
 st.set_page_config(page_title="GPU", page_icon="🖥️", layout="wide")
 ensure_schema()
 
@@ -39,12 +38,8 @@ if not products:
     st.warning("プロダクトデータがまだありません。価格収集ジョブ実行後に再度お試しください。")
     st.stop()
 
-
-options = {
-    f"{p['display_name']} ({p['sku_id']})": p["sku_id"]
-    for p in products
-}
-selected_label = st.selectbox("SKU を選択", options.keys())
+options = {f"{p['display_name']} ({p['sku_id']})": p["sku_id"] for p in products}
+selected_label = st.selectbox("SKU を選択", list(options.keys()))
 selected_sku = options[selected_label]
 
 product = next((p for p in products if p["sku_id"] == selected_sku), None)
@@ -52,7 +47,6 @@ if product:
     st.subheader(product["display_name"])
 else:
     st.subheader(selected_sku)
-
 
 latest_prices = load_latest_prices(selected_sku)
 history_30 = load_price_history(selected_sku, days=30)
@@ -68,6 +62,7 @@ def render_latest(prices: list[dict]) -> None:
     df = pd.DataFrame(prices)
     df["scraped_at"] = pd.to_datetime(df["scraped_at"])
     display_cols = ["shop", "price_jpy", "stock_status", "scraped_at", "url", "title"]
+
     st.dataframe(
         df[display_cols].rename(
             columns={
@@ -84,7 +79,7 @@ def render_latest(prices: list[dict]) -> None:
     )
 
 
-def render_history(prices: list[dict], title: str) -> None:
+def render_history(prices: list[dict], title: str, chart_key: str) -> None:
     st.markdown(f"### {title}")
     if not prices:
         st.info("表示できる価格履歴がまだありません。")
@@ -97,6 +92,7 @@ def render_history(prices: list[dict], title: str) -> None:
         return
 
     df["scraped_at"] = pd.to_datetime(df["scraped_at"])
+
     fig = px.line(
         df,
         x="scraped_at",
@@ -107,13 +103,15 @@ def render_history(prices: list[dict], title: str) -> None:
         labels={"scraped_at": "取得時刻", "price_jpy": "価格(JPY)", "shop": "ショップ"},
     )
     fig.update_layout(height=420, legend_title_text="ショップ")
-    st.plotly_chart(fig, use_container_width=True)
+
+    # ★重要：keyを必ずユニークにする
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
 
 render_latest(latest_prices)
 
 col1, col2 = st.columns(2)
 with col1:
-    render_history(history_30, "直近30日の価格推移")
+    render_history(history_30, "直近30日の価格推移", chart_key=f"price_chart_30d_{selected_sku}")
 with col2:
-    render_history(history_all, "全期間の価格推移")
+    render_history(history_all, "全期間の価格推移", chart_key=f"price_chart_all_{selected_sku}")
