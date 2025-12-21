@@ -10,6 +10,7 @@ from specscopex.db import (
     get_price_history,
     list_products,
 )
+from specscopex.signals import compute_signal
 
 st.set_page_config(page_title="GPU", page_icon="🖥️", layout="wide")
 ensure_schema()
@@ -51,6 +52,37 @@ else:
 latest_prices = load_latest_prices(selected_sku)
 history_30 = load_price_history(selected_sku, days=30)
 history_all = load_price_history(selected_sku, days=None)
+signal = compute_signal(latest_prices, history_30)
+
+
+def _format_price(price: float | int | None) -> str:
+    return f"¥{int(price):,}" if price is not None else "—"
+
+
+def _format_ratio(value: float | None) -> str:
+    return f"{value * 100:+.1f}%" if value is not None else "—"
+
+
+def render_signal_card(signal_data: dict) -> None:
+    st.markdown("### 買い時判定（信号機）")
+    metrics = signal_data.get("metrics", {})
+
+    card = st.container(border=True)
+    with card:
+        st.markdown(f"#### {signal_data.get('status_label', '🟡 Check')}")
+        st.write(signal_data.get("conclusion", "結論: データ不足"))
+
+        if metrics.get("data_insufficient"):
+            st.caption("データ不足：代表値または履歴が不足しています。")
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("現在価格（代表値）", _format_price(metrics.get("price_now")))
+        col2.metric("30日最安比", _format_ratio(metrics.get("ratio_min")))
+        col3.metric("30日平均との差", _format_ratio(metrics.get("ratio_avg")))
+        trend_label = metrics.get("trend_direction", "—")
+        trend_value = metrics.get("trend7")
+        trend_text = f"{trend_label} ({trend_value:.1f})" if trend_value is not None else trend_label
+        col4.metric("直近7日のトレンド", trend_text)
 
 
 def render_latest(prices: list[dict]) -> None:
@@ -107,6 +139,8 @@ def render_history(prices: list[dict], title: str, chart_key: str) -> None:
     # ★重要：keyを必ずユニークにする
     st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
+
+render_signal_card(signal)
 
 render_latest(latest_prices)
 
