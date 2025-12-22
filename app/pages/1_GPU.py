@@ -116,15 +116,29 @@ def _persist_forecasts(sku_id: str, forecast_data: dict) -> None:
     if not as_of or not features_hash:
         return
 
-    forecasts = forecast_data.get("forecasts", {}) or {}
+    raw = forecast_data.get("forecasts", {}) or {}
+
+    # キーを int に正規化（"7"/"30" でも保存できるようにする）
+    forecasts: dict[int, dict] = {}
+    for k, v in raw.items():
+        try:
+            forecasts[int(k)] = v
+        except (TypeError, ValueError):
+            continue
+
     for horizon, values in forecasts.items():
+        # predicted が無い/None のときは保存しない（0円保存事故を防ぐ）
+        pred = (values or {}).get("predicted_price_jpy")
+        if pred is None:
+            continue
+
         upsert_forecast_run(
             sku_id=sku_id,
             as_of=as_of,
             horizon_days=int(horizon),
-            predicted_price_jpy=float(values.get("predicted_price_jpy", 0)),
-            lower_price_jpy=values.get("lower_price_jpy"),
-            upper_price_jpy=values.get("upper_price_jpy"),
+            predicted_price_jpy=float(pred),
+            lower_price_jpy=(values or {}).get("lower_price_jpy"),
+            upper_price_jpy=(values or {}).get("upper_price_jpy"),
             model_name=forecast_data.get("model_name") or FORECAST_MODEL_NAME,
             features_hash=features_hash,
         )
@@ -141,15 +155,26 @@ def render_forecast_section(forecast_data: dict, comment: str | None) -> None:
 
         st.caption("統計モデルで算出した参考予測です。")
 
-        forecasts = forecast_data.get("forecasts", {}) or {}
+        raw = forecast_data.get("forecasts", {}) or {}
+
+        # キーを int に正規化（"7"/"30" でもUIで拾えるようにする）
+        forecasts: dict[int, dict] = {}
+        for k, v in raw.items():
+            try:
+                forecasts[int(k)] = v
+            except (TypeError, ValueError):
+                continue
+
         cols = st.columns(2)
         labels = {7: "7日後", 30: "30日後"}
+
         for idx, horizon in enumerate((7, 30)):
             data = forecasts.get(horizon)
             col = cols[idx]
             if not data:
                 col.write(f"{labels[horizon]}: データなし")
                 continue
+
             col.write(
                 f"{labels[horizon]}: "
                 f"{_format_price(data.get('predicted_price_jpy'))} "
@@ -361,9 +386,19 @@ explanation = get_signal_explanation(
 forecast_comment: str | None = None
 if forecast_result.get("ok") and show_forecast_comment:
     fx_summary_for_comment = summarize_usd_jpy(fx_rates_for_summary)
+
+    # ★ここを追加：forecasts のキーを int に正規化（"7"/"30" 対策）
+    raw_fc = forecast_result.get("forecasts", {}) or {}
+    norm_fc: dict[int, dict] = {}
+    for k, v in raw_fc.items():
+        try:
+            norm_fc[int(k)] = v
+        except (TypeError, ValueError):
+            continue
+
     try:
         forecast_comment, _ = llm_explain_forecast(
-            forecasts=forecast_result.get("forecasts", {}),
+            forecasts=norm_fc,  # ★ここを差し替え
             signals=signals_payload,
             fx_summary=fx_summary_for_comment,
         )
