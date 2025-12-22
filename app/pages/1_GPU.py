@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from specscopex.db import (
     ensure_schema,
+    get_fx_rates,
     get_latest_prices_by_sku,
     get_price_history,
     list_products,
+    upsert_fx_rates,
 )
 from specscopex.explain import get_signal_explanation
+from specscopex.fx import fetch_usd_jpy_rates
 from specscopex.signals import compute_signal
 
 st.set_page_config(page_title="GPU", page_icon="🖥️", layout="wide")
@@ -33,6 +37,11 @@ def load_latest_prices(sku_id: str) -> list[dict]:
 @st.cache_data(show_spinner=False)
 def load_price_history(sku_id: str, days: int | None = None) -> list[dict]:
     return get_price_history(sku_id=sku_id, days=days)
+
+
+@st.cache_data(show_spinner=False)
+def load_fx_rates(base: str, quote: str, start_date: str, end_date: str) -> list[dict]:
+    return get_fx_rates(base=base, quote=quote, start_date=start_date, end_date=end_date)
 
 
 products = load_products()
@@ -89,6 +98,55 @@ def _build_signals_payload(signal_data: dict, prices: list[dict]) -> dict:
         "stock_hint": _build_stock_hint(prices),
         "signal": signal_data.get("decision"),
     }
+
+
+def _date_range_from_prices(prices: list[dict]) -> tuple[str, str] | None:
+    if not prices:
+        return None
+
+    df = pd.DataFrame(prices)
+    if "scraped_at" not in df:
+        return None
+
+    df["scraped_at"] = pd.to_datetime(df["scraped_at"])
+    start_date = df["scraped_at"].min().date().isoformat()
+    end_date = df["scraped_at"].max().date().isoformat()
+    return start_date, end_date
+
+
+def _fetch_and_cache_fx(
+    *, base: str, quote: str, start_date: str, end_date: str, failure_flag: dict
+) -> list[dict]:
+    rates = load_fx_rates(base=base, quote=quote, start_date=start_date, end_date=end_date)
+    if rates:
+        return rates
+
+    fetched = fetch_usd_jpy_rates(start_date=start_date, end_date=end_date)
+    if fetched:
+        upsert_fx_rates(base=base, quote=quote, rates_by_date=fetched)
+        load_fx_rates.clear()
+        return load_fx_rates(base=base, quote=quote, start_date=start_date, end_date=end_date)
+
+    failure_flag["failed"] = True
+    return []
+
+
+def _load_fx_for_prices(
+    prices: list[dict], cache: dict[tuple[str, str], list[dict]], failure_flag: dict
+) -> list[dict]:
+    date_range = _date_range_from_prices(prices)
+    if not date_range:
+        return []
+
+    key = date_range
+    if key in cache:
+        return cache[key]
+
+    start_date, end_date = date_range
+    cache[key] = _fetch_and_cache_fx(
+        base="USD", quote="JPY", start_date=start_date, end_date=end_date, failure_flag=failure_flag
+    )
+    return cache[key]
 
 
 def render_signal_card(signal_data: dict) -> None:
@@ -152,7 +210,9 @@ def render_latest(prices: list[dict]) -> None:
     )
 
 
-def render_history(prices: list[dict], title: str, chart_key: str) -> None:
+def render_history(
+    prices: list[dict], title: str, chart_key: str, fx_rates: list[dict] | None = None
+) -> None:
     st.markdown(f"### {title}")
     if not prices:
         st.info("表示できる価格履歴がまだありません。")
@@ -177,6 +237,25 @@ def render_history(prices: list[dict], title: str, chart_key: str) -> None:
     )
     fig.update_layout(height=420, legend_title_text="ショップ")
 
+    if fx_rates:
+        fx_df = pd.DataFrame(fx_rates)
+        fx_df["date"] = pd.to_datetime(fx_df["date"])
+        fig.add_trace(
+            go.Scatter(
+                x=fx_df["date"],
+                y=fx_df["rate"],
+                mode="lines+markers",
+                name="USD/JPY",
+                yaxis="y2",
+                line=dict(color="gray", dash="dash"),
+                marker=dict(size=6),
+            )
+        )
+        fig.update_layout(
+            yaxis2=dict(title="USD/JPY", overlaying="y", side="right"),
+            legend_title_text="凡例",
+        )
+
     # ★重要：keyを必ずユニークにする
     st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
@@ -197,8 +276,38 @@ render_explanation_block(explanation, show_llm_comment)
 
 render_latest(latest_prices)
 
+show_fx_overlay = st.checkbox(
+    "USD/JPY を重ねて表示",
+    value=False,
+    help="Frankfurter APIの為替レートを第2軸で表示します（ネットワークに依存）。",
+    key=f"toggle_fx_overlay_{selected_sku}",
+)
+
+fx_cache: dict[tuple[str, str], list[dict]] = {}
+fx_failure = {"failed": False}
+
+fx_30d: list[dict] | None = None
+fx_all: list[dict] | None = None
+
+if show_fx_overlay:
+    fx_30d = _load_fx_for_prices(history_30, fx_cache, fx_failure)
+    fx_all = _load_fx_for_prices(history_all, fx_cache, fx_failure)
+
 col1, col2 = st.columns(2)
 with col1:
-    render_history(history_30, "直近30日の価格推移", chart_key=f"price_chart_30d_{selected_sku}")
+    render_history(
+        history_30,
+        "直近30日の価格推移",
+        chart_key=f"price_chart_30d_{selected_sku}_{'fx' if show_fx_overlay else 'no_fx'}",
+        fx_rates=fx_30d,
+    )
 with col2:
-    render_history(history_all, "全期間の価格推移", chart_key=f"price_chart_all_{selected_sku}")
+    render_history(
+        history_all,
+        "全期間の価格推移",
+        chart_key=f"price_chart_all_{selected_sku}_{'fx' if show_fx_overlay else 'no_fx'}",
+        fx_rates=fx_all,
+    )
+
+if show_fx_overlay and fx_failure.get("failed"):
+    st.caption("USD/JPY取得失敗")
