@@ -35,6 +35,8 @@ PYTHONPATH=src python -m specscopex.jobs.collect_prices
 PYTHONPATH=src streamlit run app/Home.py
 ```
 
+為替重ね表示のオプションをONにすると、Frankfurter（https://api.frankfurter.dev のAPIキー不要）からUSD/JPYを取得して価格推移チャートに第2軸で重ねて表示します。
+
 ## 信号機ロジック概要
 - 各SKUの最新価格から「在庫あり」を優先して最安の代表値を決定
 - 30日履歴で最安・平均・7日傾向（線形回帰の傾き）を算出

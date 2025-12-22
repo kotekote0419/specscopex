@@ -123,6 +123,22 @@ def ensure_schema() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_signal_explanations_sku ON signal_explanations(sku_id);"
         )
+
+        conn.execute(
+            """
+        CREATE TABLE IF NOT EXISTS fx_rates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            base TEXT NOT NULL,
+            quote TEXT NOT NULL,
+            rate REAL NOT NULL,
+            source TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(date, base, quote)
+        );
+        """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_fx_base_quote ON fx_rates(base, quote);")
         conn.commit()
 
 
@@ -568,6 +584,52 @@ def get_price_history(*, sku_id: str, days: int | None = None) -> list[dict[str,
         rows = conn.execute(
             f"SELECT * FROM price_history WHERE {where_clause} ORDER BY scraped_at",
             params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# -------------------------
+# FX rates
+# -------------------------
+def upsert_fx_rates(
+    base: str, quote: str, rates_by_date: dict[str, float], source: str = "frankfurter"
+) -> None:
+    created_at = utc_now_iso()
+    rows = [
+        (date, base, quote, float(rate), source, created_at)
+        for date, rate in rates_by_date.items()
+    ]
+
+    if not rows:
+        return
+
+    with _connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO fx_rates (date, base, quote, rate, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date, base, quote) DO UPDATE SET
+                rate = excluded.rate,
+                source = excluded.source
+            """,
+            rows,
+        )
+        conn.commit()
+
+
+def get_fx_rates(
+    base: str, quote: str, start_date: str, end_date: str
+) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT date, rate
+            FROM fx_rates
+            WHERE base = ? AND quote = ?
+              AND date BETWEEN ? AND ?
+            ORDER BY date
+            """,
+            (base, quote, start_date, end_date),
         ).fetchall()
         return [dict(r) for r in rows]
 
