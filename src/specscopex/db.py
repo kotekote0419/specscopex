@@ -619,7 +619,13 @@ def get_or_create_explanation(
         else:
             if row["template_text"] != template_text:
                 conn.execute(
-                    "UPDATE signal_explanations SET template_text = ? WHERE id = ?",
+                    """
+                    UPDATE signal_explanations
+                    SET template_text = ?,
+                        llm_text = NULL,
+                        llm_model = NULL
+                    WHERE id = ?
+                    """,
                     (template_text, row["id"]),
                 )
                 conn.commit()

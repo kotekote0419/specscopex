@@ -54,7 +54,7 @@ def render_signal_template(signals: dict[str, Any]) -> str:
         "check": "要確認",  # need more info
     }.get(signals.get("signal"), "要確認")
 
-    price_sentence = f"現在価格は{_format_price(p_now)}。"
+    price_sentence = f"現在価格は、{_format_price(p_now)}。"
 
     if p_min30 is None and p_avg30 is None:
         comparison_sentence = "直近30日最安・平均との差はデータ不足で比較不可。"
