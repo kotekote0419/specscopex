@@ -94,3 +94,26 @@ def llm_explanation(user_payload: str, model: str | None = None) -> ExplanationV
         f"{user_payload}"
     )
     return run_structured(ExplanationV1, system, user, model=model)
+
+
+def llm_explain_signal(
+    *, template_text: str, signals: dict, model: str | None = None
+) -> tuple[str, str]:
+    settings = get_settings()
+    model_id = model or settings.openai_model
+    user = (
+        "以下の買い時テンプレ根拠とシグナル要約をもとに、1〜2文の補足コメントを日本語で返してください。\n"
+        "外部要因やセール、新製品などの可能性を推測する場合は控えめな表現にし、断定は避けてください。\n"
+        "テンプレの内容と矛盾しないようにしてください。\n\n"
+        f"テンプレ根拠: {template_text}\n"
+        f"signals: {signals}"
+    )
+    try:
+        resp = _client().responses.create(
+            model=model_id,
+            input=[{"role": "user", "content": user}],
+        )
+        text = (resp.output_text or "").strip()
+        return text, model_id
+    except Exception as e:
+        raise LLMError(f"LLM explain call failed: {e}") from e
