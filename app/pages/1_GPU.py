@@ -10,6 +10,7 @@ from specscopex.db import (
     get_price_history,
     list_products,
 )
+from specscopex.explain import get_signal_explanation
 from specscopex.signals import compute_signal
 
 st.set_page_config(page_title="GPU", page_icon="🖥️", layout="wide")
@@ -63,6 +64,33 @@ def _format_ratio(value: float | None) -> str:
     return f"{value * 100:+.1f}%" if value is not None else "—"
 
 
+def _build_stock_hint(prices: list[dict]) -> str | None:
+    if not prices:
+        return None
+
+    statuses = [p.get("stock_status") or "" for p in prices]
+    in_stock = [s for s in statuses if "在庫" in s]
+    noted = len([s for s in statuses if s.strip()])
+    total = len(statuses)
+    if noted == 0:
+        return None
+    return f"在庫表示あり {noted}/{total}件 (在庫あり {len(in_stock)}件)"
+
+
+def _build_signals_payload(signal_data: dict, prices: list[dict]) -> dict:
+    metrics = signal_data.get("metrics", {})
+    return {
+        "p_now": metrics.get("price_now"),
+        "p_min30": metrics.get("price_min30"),
+        "p_avg30": metrics.get("price_avg30"),
+        "ratio_min": metrics.get("ratio_min"),
+        "ratio_avg": metrics.get("ratio_avg"),
+        "trend7": metrics.get("trend7"),
+        "stock_hint": _build_stock_hint(prices),
+        "signal": signal_data.get("decision"),
+    }
+
+
 def render_signal_card(signal_data: dict) -> None:
     st.markdown("### 買い時判定（信号機）")
     metrics = signal_data.get("metrics", {})
@@ -83,6 +111,19 @@ def render_signal_card(signal_data: dict) -> None:
         trend_value = metrics.get("trend7")
         trend_text = f"{trend_label} ({trend_value:.1f})" if trend_value is not None else trend_label
         col4.metric("直近7日のトレンド", trend_text)
+
+
+def render_explanation_block(explanation: dict, llm_enabled: bool) -> None:
+    st.markdown("#### 根拠文章")
+    if not explanation:
+        st.write("説明を生成できませんでした。")
+        return
+
+    st.write(explanation.get("template_text", ""))
+
+    if llm_enabled and explanation.get("llm_text"):
+        st.caption("AI補足コメント")
+        st.info(explanation["llm_text"], icon="🤖")
 
 
 def render_latest(prices: list[dict]) -> None:
@@ -140,7 +181,19 @@ def render_history(prices: list[dict], title: str, chart_key: str) -> None:
     st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
 
+signals_payload = _build_signals_payload(signal, latest_prices)
+show_llm_comment = st.toggle(
+    "AIコメントを表示",
+    value=False,
+    help="テンプレ根拠に加えて補足コメントを生成します（同条件はキャッシュされます）。",
+    key=f"toggle_ai_comment_{selected_sku}",
+)
+explanation = get_signal_explanation(
+    sku_id=selected_sku, signals=signals_payload, llm_enabled=show_llm_comment
+)
+
 render_signal_card(signal)
+render_explanation_block(explanation, show_llm_comment)
 
 render_latest(latest_prices)
 

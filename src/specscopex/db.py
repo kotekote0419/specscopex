@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import get_settings
+from .llm import LLMError, llm_explain_signal
 from .utils import json_dumps, now_iso, utc_now_iso
 
 
@@ -103,6 +104,25 @@ def ensure_schema() -> None:
         );
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_task_type ON llm_audits(task_type);")
+
+        conn.execute(
+            """
+        CREATE TABLE IF NOT EXISTS signal_explanations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sku_id TEXT NOT NULL,
+            signal TEXT NOT NULL,
+            signal_hash TEXT NOT NULL,
+            template_text TEXT NOT NULL,
+            llm_text TEXT,
+            llm_model TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(sku_id, signal_hash)
+        );
+        """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_signal_explanations_sku ON signal_explanations(sku_id);"
+        )
         conn.commit()
 
 
@@ -550,3 +570,89 @@ def get_price_history(*, sku_id: str, days: int | None = None) -> list[dict[str,
             params,
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# -------------------------
+# Signal explanations
+# -------------------------
+def _row_to_signal_explanation(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    return data
+
+
+def get_or_create_explanation(
+    *,
+    sku_id: str,
+    signals: dict[str, Any],
+    signal_hash: str,
+    template_text: str,
+    llm_enabled: bool,
+) -> dict[str, Any]:
+    created_at = now_iso()
+
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM signal_explanations WHERE sku_id = ? AND signal_hash = ?",
+            (sku_id, signal_hash),
+        ).fetchone()
+
+        if row is None:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO signal_explanations (
+                    sku_id, signal, signal_hash, template_text, llm_text, llm_model, created_at
+                ) VALUES (?, ?, ?, ?, NULL, NULL, ?)
+                """,
+                (sku_id, signals.get("signal", ""), signal_hash, template_text, created_at),
+            )
+            conn.commit()
+            if cur.lastrowid:
+                row = conn.execute(
+                    "SELECT * FROM signal_explanations WHERE id = ?",
+                    (int(cur.lastrowid),),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM signal_explanations WHERE sku_id = ? AND signal_hash = ?",
+                    (sku_id, signal_hash),
+                ).fetchone()
+        else:
+            if row["template_text"] != template_text:
+                conn.execute(
+                    """
+                    UPDATE signal_explanations
+                    SET template_text = ?,
+                        llm_text = NULL,
+                        llm_model = NULL
+                    WHERE id = ?
+                    """,
+                    (template_text, row["id"]),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM signal_explanations WHERE id = ?",
+                    (row["id"],),
+                ).fetchone()
+
+    explanation = _row_to_signal_explanation(row) if row else {}
+
+    if llm_enabled and explanation and not explanation.get("llm_text"):
+        try:
+            llm_text, model_id = llm_explain_signal(
+                template_text=template_text,
+                signals=signals,
+            )
+        except LLMError:
+            return explanation
+
+        if llm_text:
+            explanation["llm_text"] = llm_text
+            explanation["llm_model"] = model_id
+            with _connect() as conn:
+                conn.execute(
+                    "UPDATE signal_explanations SET llm_text = ?, llm_model = ? WHERE id = ?",
+                    (llm_text, model_id, explanation.get("id")),
+                )
+                conn.commit()
+
+    return explanation
