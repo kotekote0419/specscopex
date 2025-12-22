@@ -117,6 +117,8 @@ def llm_explain_signal(
             input=[{"role": "user", "content": user}],
         )
         text = (resp.output_text or "").strip()
+        if not text:
+            raise LLMError("LLM returned empty text")
         return text, model_id
     except Exception as e:
         raise LLMError(f"LLM explain call failed: {e}") from e

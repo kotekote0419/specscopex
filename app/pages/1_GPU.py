@@ -310,8 +310,6 @@ if show_fx_overlay:
         else _load_fx_for_prices(history_30, fx_cache, fx_failure)
     )
     fx_all = _load_fx_for_prices(history_all, fx_cache, fx_failure)
-    st.write("fx_30d:", 0 if not fx_30d else len(fx_30d))
-    st.write("fx_all:", 0 if not fx_all else len(fx_all))
 
 col1, col2 = st.columns(2)
 with col1:
