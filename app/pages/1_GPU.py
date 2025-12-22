@@ -16,6 +16,8 @@ from specscopex.db import (
 from specscopex.explain import get_signal_explanation
 from specscopex.fx import fetch_usd_jpy_rates
 from specscopex.signals import compute_signal
+from datetime import date, timedelta
+
 
 st.set_page_config(page_title="GPU", page_icon="🖥️", layout="wide")
 ensure_schema()
@@ -138,13 +140,18 @@ def _load_fx_for_prices(
     if not date_range:
         return []
 
-    key = date_range
+    start_date, end_date = date_range
+
+    # ★重要：FXは休日/当日未確定で「直近営業日」にズレることがあるのでレンジを広げる
+    fx_start = (date.fromisoformat(start_date) - timedelta(days=7)).isoformat()
+    fx_end = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
+
+    key = (fx_start, fx_end)
     if key in cache:
         return cache[key]
 
-    start_date, end_date = date_range
     cache[key] = _fetch_and_cache_fx(
-        base="USD", quote="JPY", start_date=start_date, end_date=end_date, failure_flag=failure_flag
+        base="USD", quote="JPY", start_date=fx_start, end_date=fx_end, failure_flag=failure_flag
     )
     return cache[key]
 
@@ -292,6 +299,8 @@ fx_all: list[dict] | None = None
 if show_fx_overlay:
     fx_30d = _load_fx_for_prices(history_30, fx_cache, fx_failure)
     fx_all = _load_fx_for_prices(history_all, fx_cache, fx_failure)
+    st.write("fx_30d:", 0 if not fx_30d else len(fx_30d))
+    st.write("fx_all:", 0 if not fx_all else len(fx_all))
 
 col1, col2 = st.columns(2)
 with col1:
