@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Type, TypeVar
+from typing import Any, Type, TypeVar
 
 from openai import OpenAI
 from pydantic import BaseModel
@@ -122,3 +122,33 @@ def llm_explain_signal(
         return text, model_id
     except Exception as e:
         raise LLMError(f"LLM explain call failed: {e}") from e
+
+
+def llm_explain_forecast(
+    *,
+    forecasts: dict[int, dict[str, Any]],
+    signals: dict[str, Any],
+    fx_summary: dict[str, Any] | None = None,
+    model: str | None = None,
+) -> tuple[str, str]:
+    settings = get_settings()
+    model_id = model or settings.openai_model
+    user = (
+        "以下のGPU価格予測とシグナル要約をもとに、1〜2文の短いコメントを日本語で返してください。\n"
+        "与えられた数値以外の数値は生成せず、予測の不確実性を前提に控えめな表現にしてください。\n"
+        "因果関係は断定せず、影響の可能性として触れるに留めてください。\n\n"
+        f"forecasts: {forecasts}\n"
+        f"signal_data: {signals}\n"
+        f"fx_summary: {fx_summary or 'unknown'}"
+    )
+    try:
+        resp = _client().responses.create(
+            model=model_id,
+            input=[{"role": "user", "content": user}],
+        )
+        text = (resp.output_text or "").strip()
+        if not text:
+            raise LLMError("LLM returned empty text")
+        return text, model_id
+    except Exception as e:
+        raise LLMError(f"LLM forecast explain call failed: {e}") from e

@@ -139,6 +139,27 @@ def ensure_schema() -> None:
         """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_fx_base_quote ON fx_rates(base, quote);")
+
+        conn.execute(
+            """
+        CREATE TABLE IF NOT EXISTS forecast_runs (
+            id INTEGER PRIMARY KEY,
+            sku_id TEXT NOT NULL,
+            as_of TEXT NOT NULL,
+            horizon_days INTEGER NOT NULL,
+            predicted_price_jpy REAL NOT NULL,
+            lower_price_jpy REAL NULL,
+            upper_price_jpy REAL NULL,
+            model_name TEXT NOT NULL,
+            features_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(sku_id, as_of, horizon_days, model_name, features_hash)
+        );
+        """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_forecast_runs_sku ON forecast_runs(sku_id);"
+        )
         conn.commit()
 
 
@@ -585,6 +606,82 @@ def get_price_history(*, sku_id: str, days: int | None = None) -> list[dict[str,
             f"SELECT * FROM price_history WHERE {where_clause} ORDER BY scraped_at",
             params,
         ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# -------------------------
+# Forecast runs
+# -------------------------
+def upsert_forecast_run(
+    *,
+    sku_id: str,
+    as_of: str,
+    horizon_days: int,
+    predicted_price_jpy: float,
+    lower_price_jpy: float | None,
+    upper_price_jpy: float | None,
+    model_name: str,
+    features_hash: str,
+) -> None:
+    created_at = now_iso()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO forecast_runs (
+                sku_id, as_of, horizon_days, predicted_price_jpy,
+                lower_price_jpy, upper_price_jpy, model_name, features_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(sku_id, as_of, horizon_days, model_name, features_hash)
+            DO UPDATE SET
+                predicted_price_jpy = excluded.predicted_price_jpy,
+                lower_price_jpy = excluded.lower_price_jpy,
+                upper_price_jpy = excluded.upper_price_jpy,
+                created_at = excluded.created_at
+            """,
+            (
+                sku_id,
+                as_of,
+                horizon_days,
+                predicted_price_jpy,
+                lower_price_jpy,
+                upper_price_jpy,
+                model_name,
+                features_hash,
+                created_at,
+            ),
+        )
+        conn.commit()
+
+
+def get_latest_forecasts(*, sku_id: str, model_name: str, limit: int = 10) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM forecast_runs
+            WHERE sku_id = ? AND model_name = ?
+            ORDER BY as_of DESC, created_at DESC
+            LIMIT ?
+            """,
+            (sku_id, model_name, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_forecasts_for_period(
+    *, sku_id: str, start_date: str, end_date: str, model_name: str | None = None
+) -> list[dict]:
+    clauses = ["sku_id = ?", "as_of BETWEEN ? AND ?"]
+    params: list[Any] = [sku_id, start_date, end_date]
+
+    if model_name:
+        clauses.append("model_name = ?")
+        params.append(model_name)
+
+    query = "SELECT * FROM forecast_runs WHERE " + " AND ".join(clauses)
+
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
 

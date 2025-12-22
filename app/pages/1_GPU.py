@@ -12,9 +12,13 @@ from specscopex.db import (
     get_price_history,
     list_products,
     upsert_fx_rates,
+    upsert_forecast_run,
 )
 from specscopex.explain import get_signal_explanation
+from specscopex.forecast import MODEL_NAME as FORECAST_MODEL_NAME, compute_forecast
 from specscopex.fx import fetch_usd_jpy_rates
+from specscopex.fx_summary import summarize_usd_jpy
+from specscopex.llm import LLMError, llm_explain_forecast
 from specscopex.signals import compute_signal
 from datetime import date, timedelta
 
@@ -65,6 +69,7 @@ latest_prices = load_latest_prices(selected_sku)
 history_30 = load_price_history(selected_sku, days=30)
 history_all = load_price_history(selected_sku, days=None)
 signal = compute_signal(latest_prices, history_30)
+forecast_result = compute_forecast(history_all)
 
 
 def _format_price(price: float | int | None) -> str:
@@ -100,6 +105,63 @@ def _build_signals_payload(signal_data: dict, prices: list[dict]) -> dict:
         "stock_hint": _build_stock_hint(prices),
         "signal": signal_data.get("decision"),
     }
+
+
+def _persist_forecasts(sku_id: str, forecast_data: dict) -> None:
+    if not forecast_data.get("ok"):
+        return
+
+    as_of = forecast_data.get("as_of")
+    features_hash = forecast_data.get("features_hash")
+    if not as_of or not features_hash:
+        return
+
+    forecasts = forecast_data.get("forecasts", {}) or {}
+    for horizon, values in forecasts.items():
+        upsert_forecast_run(
+            sku_id=sku_id,
+            as_of=as_of,
+            horizon_days=int(horizon),
+            predicted_price_jpy=float(values.get("predicted_price_jpy", 0)),
+            lower_price_jpy=values.get("lower_price_jpy"),
+            upper_price_jpy=values.get("upper_price_jpy"),
+            model_name=forecast_data.get("model_name") or FORECAST_MODEL_NAME,
+            features_hash=features_hash,
+        )
+
+
+def render_forecast_section(forecast_data: dict, comment: str | None) -> None:
+    st.markdown("### 価格予測（参考）")
+    card = st.container(border=True)
+    with card:
+        if not forecast_data.get("ok"):
+            reason = forecast_data.get("reason") or "データ不足"
+            st.write(f"予測不可（{reason}）")
+            return
+
+        st.caption("統計モデルで算出した参考予測です。")
+
+        forecasts = forecast_data.get("forecasts", {}) or {}
+        cols = st.columns(2)
+        labels = {7: "7日後", 30: "30日後"}
+        for idx, horizon in enumerate((7, 30)):
+            data = forecasts.get(horizon)
+            col = cols[idx]
+            if not data:
+                col.write(f"{labels[horizon]}: データなし")
+                continue
+            col.write(
+                f"{labels[horizon]}: "
+                f"{_format_price(data.get('predicted_price_jpy'))} "
+                f"({_format_price(data.get('lower_price_jpy'))}〜{_format_price(data.get('upper_price_jpy'))})"
+            )
+
+        if forecast_data.get("as_of"):
+            st.caption(f"基準時刻: {forecast_data['as_of']}")
+
+        if comment:
+            st.caption("AI補足コメント（数値はモデル算出済み）")
+            st.info(comment, icon="🤖")
 
 
 def _date_range_from_prices(prices: list[dict]) -> tuple[str, str] | None:
@@ -268,6 +330,7 @@ def render_history(
 
 
 signals_payload = _build_signals_payload(signal, latest_prices)
+_persist_forecasts(selected_sku, forecast_result)
 fx_cache: dict[tuple[str, str], list[dict]] = {}
 fx_failure = {"failed": False}
 fx_rates_for_summary: list[dict] | None = None
@@ -278,7 +341,14 @@ show_llm_comment = st.toggle(
     key=f"toggle_ai_comment_{selected_sku}",
 )
 
-if show_llm_comment:
+show_forecast_comment = st.toggle(
+    "AIで予測コメント（任意）",
+    value=False,
+    help="予測値とレンジの読み方を1〜2文で補足します（数値はモデル算出固定）。",
+    key=f"toggle_ai_forecast_comment_{selected_sku}",
+)
+
+if show_llm_comment or show_forecast_comment:
     fx_rates_for_summary = _load_fx_for_prices(history_30, fx_cache, fx_failure)
 
 explanation = get_signal_explanation(
@@ -288,7 +358,20 @@ explanation = get_signal_explanation(
     fx_rates=fx_rates_for_summary,
 )
 
+forecast_comment: str | None = None
+if forecast_result.get("ok") and show_forecast_comment:
+    fx_summary_for_comment = summarize_usd_jpy(fx_rates_for_summary)
+    try:
+        forecast_comment, _ = llm_explain_forecast(
+            forecasts=forecast_result.get("forecasts", {}),
+            signals=signals_payload,
+            fx_summary=fx_summary_for_comment,
+        )
+    except LLMError:
+        forecast_comment = None
+
 render_signal_card(signal)
+render_forecast_section(forecast_result, forecast_comment)
 render_explanation_block(explanation, show_llm_comment)
 
 render_latest(latest_prices)
