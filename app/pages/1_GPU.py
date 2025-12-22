@@ -268,14 +268,24 @@ def render_history(
 
 
 signals_payload = _build_signals_payload(signal, latest_prices)
+fx_cache: dict[tuple[str, str], list[dict]] = {}
+fx_failure = {"failed": False}
+fx_rates_for_summary: list[dict] | None = None
 show_llm_comment = st.toggle(
     "AIコメントを表示",
     value=False,
     help="テンプレ根拠に加えて補足コメントを生成します（同条件はキャッシュされます）。",
     key=f"toggle_ai_comment_{selected_sku}",
 )
+
+if show_llm_comment:
+    fx_rates_for_summary = _load_fx_for_prices(history_30, fx_cache, fx_failure)
+
 explanation = get_signal_explanation(
-    sku_id=selected_sku, signals=signals_payload, llm_enabled=show_llm_comment
+    sku_id=selected_sku,
+    signals=signals_payload,
+    llm_enabled=show_llm_comment,
+    fx_rates=fx_rates_for_summary,
 )
 
 render_signal_card(signal)
@@ -290,17 +300,16 @@ show_fx_overlay = st.checkbox(
     key=f"toggle_fx_overlay_{selected_sku}",
 )
 
-fx_cache: dict[tuple[str, str], list[dict]] = {}
-fx_failure = {"failed": False}
-
 fx_30d: list[dict] | None = None
 fx_all: list[dict] | None = None
 
 if show_fx_overlay:
-    fx_30d = _load_fx_for_prices(history_30, fx_cache, fx_failure)
+    fx_30d = (
+        fx_rates_for_summary
+        if fx_rates_for_summary is not None
+        else _load_fx_for_prices(history_30, fx_cache, fx_failure)
+    )
     fx_all = _load_fx_for_prices(history_all, fx_cache, fx_failure)
-    st.write("fx_30d:", 0 if not fx_30d else len(fx_30d))
-    st.write("fx_all:", 0 if not fx_all else len(fx_all))
 
 col1, col2 = st.columns(2)
 with col1:
