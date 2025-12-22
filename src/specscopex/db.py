@@ -649,6 +649,7 @@ def get_or_create_explanation(
     signal_hash: str,
     template_text: str,
     llm_enabled: bool,
+    fx_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     created_at = now_iso()
 
@@ -703,6 +704,7 @@ def get_or_create_explanation(
             llm_text, model_id = llm_explain_signal(
                 template_text=template_text,
                 signals=signals,
+                fx_summary=fx_summary,
             )
         except LLMError:
             return explanation

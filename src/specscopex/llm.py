@@ -97,16 +97,19 @@ def llm_explanation(user_payload: str, model: str | None = None) -> ExplanationV
 
 
 def llm_explain_signal(
-    *, template_text: str, signals: dict, model: str | None = None
+    *, template_text: str, signals: dict, model: str | None = None, fx_summary: dict | None = None
 ) -> tuple[str, str]:
     settings = get_settings()
     model_id = model or settings.openai_model
     user = (
         "以下の買い時テンプレ根拠とシグナル要約をもとに、1〜2文の補足コメントを日本語で返してください。\n"
         "外部要因やセール、新製品などの可能性を推測する場合は控えめな表現にし、断定は避けてください。\n"
+        "USD/JPYが変動している場合は、価格に影響する可能性として1文だけ触れて構いませんが、因果は断定せず外部要因の例として述べてください。\n"
+        "渡された数値のみを根拠として使い、架空の数値は作らないでください。\n"
         "テンプレの内容と矛盾しないようにしてください。\n\n"
         f"テンプレ根拠: {template_text}\n"
-        f"signals: {signals}"
+        f"signals: {signals}\n"
+        f"fx_summary: {fx_summary or 'unknown'}"
     )
     try:
         resp = _client().responses.create(
