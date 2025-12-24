@@ -1,6 +1,6 @@
 # SpecScopeX — PCパーツ買い時ナビ
 
-Streamlit + SQLite + OpenAI Structured Outputs（Pydantic 4スキーマ）で
+Streamlit + Supabase(PostgreSQL) + OpenAI Structured Outputs（Pydantic 4スキーマ）で
 - Adminレビューキュー（pending/approved/rejected）
 - URL貼るだけ追加 → HTML取得 → LLM監査 → sku_candidate → Approveでproducts登録
 まで動く最小構成です。
@@ -20,9 +20,13 @@ python -m venv .venv
 pip install -r requirements.txt --upgrade
 ```
 
+### Database (Supabase/PostgreSQL)
+- Supabase プロジェクトを作成し、環境変数 `DATABASE_URL` に接続文字列を設定してください。
+- Supabase の SQL Editor で `migrations/001_supabase_init.sql` を実行し、テーブルを作成してください。
+
 ## Run price collection
-1. DB スキーマを自動で作成した上で、product_aliases の URL を巡回して価格収集します。
-2. 既存の `price_history` に `(sku_id, url, scraped_at)` が同じデータがある場合は上書きします。
+1. Supabase 上の `product_urls` から URL を巡回して価格収集します（legacy の `product_aliases` はフォールバックのみ）。
+2. `product_url_id × scraped_date(JST)` で 1 日 1 件に upsert されます。
 
 ```bash
 PYTHONPATH=src python -m specscopex.jobs.collect_prices

@@ -1,166 +1,26 @@
 from __future__ import annotations
 
-import sqlite3
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
+
+import psycopg
+from psycopg import errors
+from psycopg.rows import dict_row
 
 from .config import get_settings
 from .llm import LLMError, llm_explain_signal
 from .utils import json_dumps, now_iso, utc_now_iso
 
 
-def _connect() -> sqlite3.Connection:
+def _connect():
     settings = get_settings()
-    db_path = Path(settings.db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)  # ensure ./data exists
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    return conn
+    if not settings.database_url:
+        raise RuntimeError("DATABASE_URL is not set")
+    return psycopg.connect(settings.database_url, row_factory=dict_row)
 
 
 def ensure_schema() -> None:
-    with _connect() as conn:
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS admin_review_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_type TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
-            payload_json TEXT NOT NULL,
-            suggested_json TEXT,
-            final_json TEXT,
-            confidence REAL,
-            needs_review INTEGER,
-            reason_code TEXT,
-            note TEXT,
-            resolver TEXT,
-            created_at TEXT NOT NULL,
-            resolved_at TEXT,
-            model_id TEXT,
-            prompt_version TEXT,
-            schema_version TEXT
-        );
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_review_status ON admin_review_queue(status);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_review_item_type ON admin_review_queue(item_type);")
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            sku_id TEXT PRIMARY KEY,
-            display_name TEXT NOT NULL,
-            normalized_model TEXT,
-            variant TEXT,
-            memory_gb INTEGER,
-            perf_score REAL,
-            created_at TEXT NOT NULL
-        );
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_products_model ON products(normalized_model);")
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS product_aliases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sku_id TEXT NOT NULL,
-            shop TEXT,
-            alias_text TEXT,
-            url TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (sku_id) REFERENCES products(sku_id)
-        );
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_sku ON product_aliases(sku_id);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_url ON product_aliases(url);")
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS price_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sku_id TEXT NOT NULL,
-            shop TEXT,
-            url TEXT,
-            price_jpy INTEGER,
-            stock_status TEXT,
-            title TEXT,
-            scraped_at TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            currency TEXT DEFAULT 'JPY',
-            FOREIGN KEY (sku_id) REFERENCES products(sku_id)
-        );
-        """)
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_price_unique ON price_history(sku_id, url, scraped_at);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_price_sku ON price_history(sku_id);")
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS llm_audits (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_type TEXT NOT NULL,
-            model_id TEXT,
-            prompt_version TEXT,
-            schema_version TEXT,
-            input_digest TEXT,
-            output_json TEXT,
-            confidence REAL,
-            needs_review INTEGER,
-            created_at TEXT NOT NULL
-        );
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_task_type ON llm_audits(task_type);")
-
-        conn.execute(
-            """
-        CREATE TABLE IF NOT EXISTS signal_explanations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sku_id TEXT NOT NULL,
-            signal TEXT NOT NULL,
-            signal_hash TEXT NOT NULL,
-            template_text TEXT NOT NULL,
-            llm_text TEXT,
-            llm_model TEXT,
-            created_at TEXT NOT NULL,
-            UNIQUE(sku_id, signal_hash)
-        );
-        """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_signal_explanations_sku ON signal_explanations(sku_id);"
-        )
-
-        conn.execute(
-            """
-        CREATE TABLE IF NOT EXISTS fx_rates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            base TEXT NOT NULL,
-            quote TEXT NOT NULL,
-            rate REAL NOT NULL,
-            source TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            UNIQUE(date, base, quote)
-        );
-        """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_fx_base_quote ON fx_rates(base, quote);")
-
-        conn.execute(
-            """
-        CREATE TABLE IF NOT EXISTS forecast_runs (
-            id INTEGER PRIMARY KEY,
-            sku_id TEXT NOT NULL,
-            as_of TEXT NOT NULL,
-            horizon_days INTEGER NOT NULL,
-            predicted_price_jpy REAL NOT NULL,
-            lower_price_jpy REAL NULL,
-            upper_price_jpy REAL NULL,
-            model_name TEXT NOT NULL,
-            features_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            UNIQUE(sku_id, as_of, horizon_days, model_name, features_hash)
-        );
-        """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_forecast_runs_sku ON forecast_runs(sku_id);"
-        )
-        conn.commit()
+    """Supabase側でマイグレーションを適用する前提のため、ここでは no-op。"""
+    return None
 
 
 # -------------------------
@@ -189,22 +49,23 @@ def enqueue_review_item(
                 confidence, needs_review, created_at,
                 model_id, prompt_version, schema_version
             )
-            VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
             """,
             (
                 item_type,
                 payload_json,
                 suggested_json,
                 confidence,
-                1 if needs_review else (0 if needs_review is not None else None),
+                True if needs_review else (False if needs_review is not None else None),
                 created_at,
                 model_id,
                 prompt_version,
                 schema_version,
             ),
         )
-        conn.commit()
-        return int(cur.lastrowid)
+        row = cur.fetchone()
+        return int(row["id"]) if row else 0
 
 
 def list_review_items(
@@ -218,16 +79,16 @@ def list_review_items(
     params: list[Any] = []
 
     if status:
-        clauses.append("status = ?")
+        clauses.append("status = %s")
         params.append(status)
     if item_type:
-        clauses.append("item_type = ?")
+        clauses.append("item_type = %s")
         params.append(item_type)
 
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
 
-    query += " ORDER BY id DESC LIMIT ?"
+    query += " ORDER BY id DESC LIMIT %s"
     params.append(limit)
 
     with _connect() as conn:
@@ -237,7 +98,7 @@ def list_review_items(
 
 def get_review_item(item_id: int) -> dict[str, Any] | None:
     with _connect() as conn:
-        row = conn.execute("SELECT * FROM admin_review_queue WHERE id = ?", (item_id,)).fetchone()
+        row = conn.execute("SELECT * FROM admin_review_queue WHERE id = %s", (item_id,)).fetchone()
         return dict(row) if row else None
 
 
@@ -256,25 +117,24 @@ def update_review_suggested(
         conn.execute(
             """
             UPDATE admin_review_queue
-            SET suggested_json = ?,
-                confidence = ?,
-                needs_review = ?,
-                model_id = ?,
-                prompt_version = ?,
-                schema_version = ?
-            WHERE id = ?
+            SET suggested_json = %s,
+                confidence = %s,
+                needs_review = %s,
+                model_id = %s,
+                prompt_version = %s,
+                schema_version = %s
+            WHERE id = %s
             """,
             (
                 suggested_json,
                 confidence,
-                1 if needs_review else (0 if needs_review is not None else None),
+                True if needs_review else (False if needs_review is not None else None),
                 model_id,
                 prompt_version,
                 schema_version,
                 item_id,
             ),
         )
-        conn.commit()
 
 
 def save_review_draft_final(*, item_id: int, final_obj: Any | None) -> None:
@@ -285,10 +145,9 @@ def save_review_draft_final(*, item_id: int, final_obj: Any | None) -> None:
     final_json = json_dumps(final_obj) if final_obj is not None else None
     with _connect() as conn:
         conn.execute(
-            "UPDATE admin_review_queue SET final_json = ? WHERE id = ?",
+            "UPDATE admin_review_queue SET final_json = %s WHERE id = %s",
             (final_json, item_id),
         )
-        conn.commit()
 
 
 def update_review_status(
@@ -310,21 +169,20 @@ def update_review_status(
         conn.execute(
             """
             UPDATE admin_review_queue
-            SET status = ?,
-                resolver = ?,
-                resolved_at = ?,
-                final_json = COALESCE(?, final_json),
-                reason_code = COALESCE(?, reason_code),
-                note = COALESCE(?, note)
-            WHERE id = ?
+            SET status = %s,
+                resolver = %s,
+                resolved_at = %s,
+                final_json = COALESCE(%s, final_json),
+                reason_code = COALESCE(%s, reason_code),
+                note = COALESCE(%s, note)
+            WHERE id = %s
             """,
             (new_status, resolver, resolved_at, final_json, reason_code, note, item_id),
         )
-        conn.commit()
 
 
 # -------------------------
-# LLM audit log
+# LLM audits
 # -------------------------
 def insert_llm_audit(
     *,
@@ -336,16 +194,15 @@ def insert_llm_audit(
     output_json: str,
     confidence: float | None,
     needs_review: bool | None,
-) -> int:
+) -> None:
     created_at = now_iso()
     with _connect() as conn:
-        cur = conn.execute(
+        conn.execute(
             """
             INSERT INTO llm_audits (
                 task_type, model_id, prompt_version, schema_version,
                 input_digest, output_json, confidence, needs_review, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 task_type,
@@ -355,12 +212,10 @@ def insert_llm_audit(
                 input_digest,
                 output_json,
                 confidence,
-                1 if needs_review else (0 if needs_review is not None else None),
+                True if needs_review else (False if needs_review is not None else None),
                 created_at,
             ),
         )
-        conn.commit()
-        return int(cur.lastrowid)
 
 
 # -------------------------
@@ -380,11 +235,16 @@ def insert_product(
         conn.execute(
             """
             INSERT INTO products (sku_id, display_name, normalized_model, variant, memory_gb, perf_score, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (sku_id) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                normalized_model = EXCLUDED.normalized_model,
+                variant = EXCLUDED.variant,
+                memory_gb = EXCLUDED.memory_gb,
+                perf_score = EXCLUDED.perf_score
             """,
             (sku_id, display_name, normalized_model, variant, memory_gb, perf_score, created_at),
         )
-        conn.commit()
 
 
 def insert_alias(
@@ -399,16 +259,40 @@ def insert_alias(
         conn.execute(
             """
             INSERT INTO product_aliases (sku_id, shop, alias_text, url, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (sku_id, shop, alias_text, url) DO NOTHING
             """,
             (sku_id, shop, alias_text, url, created_at),
         )
-        conn.commit()
+    if url:
+        upsert_product_url(sku_id=sku_id, shop=shop or "", url=url, title=alias_text)
 
 
 def list_products(limit: int = 200) -> list[dict[str, Any]]:
     with _connect() as conn:
-        rows = conn.execute("SELECT * FROM products ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        # Prefer existing products table when available
+        try:
+            rows = conn.execute(
+                "SELECT * FROM products ORDER BY created_at DESC NULLS LAST LIMIT %s",
+                (limit,),
+            ).fetchall()
+            if rows:
+                return [dict(r) for r in rows]
+        except errors.UndefinedTable:
+            pass
+
+        # Fallback: distinct sku_id from product_urls
+        rows = conn.execute(
+            """
+            SELECT sku_id, sku_id AS display_name, MAX(created_at) AS created_at
+            FROM product_urls
+            WHERE is_active IS TRUE
+            GROUP BY sku_id
+            ORDER BY MAX(updated_at) DESC NULLS LAST, MAX(created_at) DESC NULLS LAST
+            LIMIT %s
+            """,
+            (limit,),
+        ).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -425,33 +309,76 @@ def find_product_by_key(
         return None
 
     with _connect() as conn:
-        row = conn.execute(
+        try:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM products
+                WHERE normalized_model = %s
+                  AND COALESCE(variant,'') = COALESCE(%s, '')
+                  AND COALESCE(memory_gb,-1) = COALESCE(%s, -1)
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                (normalized_model, variant, memory_gb),
+            ).fetchone()
+            return dict(row) if row else None
+        except errors.UndefinedTable:
+            return None
+
+
+# -------------------------
+# Product URLs (Supabase)
+# -------------------------
+def upsert_product_url(
+    sku_id: str,
+    shop: str,
+    url: str,
+    title: str | None = None,
+    is_active: bool = True,
+) -> int:
+    with _connect() as conn:
+        cur = conn.execute(
             """
-            SELECT *
-            FROM products
-            WHERE normalized_model = ?
-              AND COALESCE(variant,'') = COALESCE(?, '')
-              AND COALESCE(memory_gb,-1) = COALESCE(?, -1)
-            ORDER BY created_at DESC
-            LIMIT 1
+            INSERT INTO product_urls (sku_id, shop, url, title, is_active)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (sku_id, shop, url) DO UPDATE
+            SET title = COALESCE(EXCLUDED.title, product_urls.title),
+                updated_at = NOW(),
+                is_active = EXCLUDED.is_active
+            RETURNING id
             """,
-            (normalized_model, variant, memory_gb),
-        ).fetchone()
-        return dict(row) if row else None
+            (sku_id, shop, url, title, is_active),
+        )
+        row = cur.fetchone()
+        return int(row["id"]) if row else 0
 
 
-# -------------------------
-# Aliases
-# -------------------------
 def list_aliases_for_sku(*, sku_id: str, limit: int = 200) -> list[dict[str, Any]]:
     with _connect() as conn:
+        try:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM product_aliases
+                WHERE sku_id = %s
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                (sku_id, limit),
+            ).fetchall()
+            if rows:
+                return [dict(r) for r in rows]
+        except errors.UndefinedTable:
+            pass
+
         rows = conn.execute(
             """
-            SELECT *
-            FROM product_aliases
-            WHERE sku_id = ?
-            ORDER BY created_at DESC
-            LIMIT ?
+            SELECT id, sku_id, shop, url, title AS alias_text, created_at
+            FROM product_urls
+            WHERE sku_id = %s
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+            LIMIT %s
             """,
             (sku_id, limit),
         ).fetchall()
@@ -475,10 +402,9 @@ def find_alias_duplicate(
             row = conn.execute(
                 """
                 SELECT *
-                FROM product_aliases
-                WHERE sku_id = ?
-                  AND url = ?
-                ORDER BY created_at DESC
+                FROM product_urls
+                WHERE sku_id = %s AND url = %s
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
                 LIMIT 1
                 """,
                 (sku_id, url),
@@ -490,11 +416,11 @@ def find_alias_duplicate(
             row = conn.execute(
                 """
                 SELECT *
-                FROM product_aliases
-                WHERE sku_id = ?
-                  AND COALESCE(shop,'') = COALESCE(?, '')
-                  AND COALESCE(alias_text,'') = COALESCE(?, '')
-                ORDER BY created_at DESC
+                FROM product_urls
+                WHERE sku_id = %s
+                  AND COALESCE(shop,'') = COALESCE(%s, '')
+                  AND COALESCE(title,'') = COALESCE(%s, '')
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
                 LIMIT 1
                 """,
                 (sku_id, shop, alias_text),
@@ -510,100 +436,125 @@ def find_alias_duplicate(
 # -------------------------
 def list_price_targets(limit: int = 1000) -> list[dict[str, Any]]:
     """
-    Enumerate alias URLs to be scraped.
-    Only aliases with non-empty URL are returned.
+    Enumerate URLs to be scraped. Prefers product_urls over legacy aliases.
+    Only active URLs are returned.
     """
-
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT sku_id, shop, url
-            FROM product_aliases
-            WHERE url IS NOT NULL AND TRIM(url) != ''
-            ORDER BY created_at DESC
-            LIMIT ?
+            SELECT sku_id, shop, url, id AS product_url_id
+            FROM product_urls
+            WHERE is_active IS TRUE
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+            LIMIT %s
             """,
             (limit,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        if rows:
+            return [dict(r) for r in rows]
+
+        try:
+            legacy_rows = conn.execute(
+                """
+                SELECT sku_id, shop, url, NULL::bigint AS product_url_id
+                FROM product_aliases
+                WHERE url IS NOT NULL AND TRIM(url) != ''
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in legacy_rows]
+        except errors.UndefinedTable:
+            return []
 
 
-def insert_price_history(
+def upsert_price_snapshot(
     *,
-    sku_id: str,
-    shop: str | None,
-    url: str,
+    product_url_id: int,
+    scraped_at: str,
+    scraped_date: str,
     price_jpy: int | None,
     stock_status: str | None,
-    title: str | None,
-    scraped_at: str,
-    currency: str = "JPY",
 ) -> None:
-    created_at = utc_now_iso()
     with _connect() as conn:
         conn.execute(
             """
             INSERT INTO price_history (
-                sku_id, shop, url, price_jpy, stock_status, title, scraped_at, created_at, currency
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(sku_id, url, scraped_at) DO UPDATE SET
-                price_jpy = excluded.price_jpy,
-                stock_status = excluded.stock_status,
-                title = COALESCE(excluded.title, price_history.title),
-                currency = excluded.currency
+                product_url_id, scraped_at, scraped_date, price_jpy, stock_status
+            ) VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (product_url_id, scraped_date) DO UPDATE
+            SET price_jpy = EXCLUDED.price_jpy,
+                stock_status = EXCLUDED.stock_status,
+                scraped_at = EXCLUDED.scraped_at
+            WHERE (EXCLUDED.price_jpy, EXCLUDED.stock_status)
+                  IS DISTINCT FROM (price_history.price_jpy, price_history.stock_status)
             """,
-            (sku_id, shop, url, price_jpy, stock_status, title, scraped_at, created_at, currency),
+            (product_url_id, scraped_at, scraped_date, price_jpy, stock_status),
         )
-        conn.commit()
 
 
 def get_latest_prices_by_sku(*, sku_id: str) -> list[dict[str, Any]]:
     """
-    Return the latest price rows per (shop, url).
+    Return the latest price rows per product URL.
     """
-
     with _connect() as conn:
         rows = conn.execute(
             """
-            WITH latest AS (
-                SELECT sku_id, shop, url, MAX(scraped_at) AS max_scraped_at
-                FROM price_history
-                WHERE sku_id = ?
-                GROUP BY shop, url
-            )
-            SELECT ph.*
-            FROM price_history ph
-            JOIN latest l
-                ON ph.sku_id = l.sku_id
-               AND ph.url = l.url
-               AND ph.scraped_at = l.max_scraped_at
-               AND (
-                    (ph.shop = l.shop)
-                    OR (ph.shop IS NULL AND l.shop IS NULL)
-               )
-            WHERE ph.sku_id = ?
-            ORDER BY COALESCE(ph.shop, ''), ph.url
+            SELECT
+                pu.id AS product_url_id,
+                pu.sku_id,
+                pu.shop,
+                pu.url,
+                pu.title,
+                ph.price_jpy,
+                ph.stock_status,
+                ph.scraped_at,
+                ph.scraped_date
+            FROM product_urls pu
+            JOIN LATERAL (
+                SELECT price_jpy, stock_status, scraped_at, scraped_date
+                FROM price_history ph
+                WHERE ph.product_url_id = pu.id
+                ORDER BY ph.scraped_at DESC
+                LIMIT 1
+            ) ph ON TRUE
+            WHERE pu.sku_id = %s AND pu.is_active IS TRUE
+            ORDER BY COALESCE(pu.shop, ''), pu.url
             """,
-            (sku_id, sku_id),
+            (sku_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
 
 def get_price_history(*, sku_id: str, days: int | None = None) -> list[dict[str, Any]]:
-    clauses = ["sku_id = ?"]
+    clauses = ["pu.sku_id = %s"]
     params: list[Any] = [sku_id]
 
     if days is not None:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).replace(microsecond=0).isoformat()
-        clauses.append("scraped_at >= ?")
-        params.append(cutoff)
+        clauses.append("ph.scraped_at >= NOW() - (%s || ' days')::interval")
+        params.append(days)
 
     where_clause = " AND ".join(clauses)
 
     with _connect() as conn:
         rows = conn.execute(
-            f"SELECT * FROM price_history WHERE {where_clause} ORDER BY scraped_at",
+            f"""
+            SELECT
+                pu.id AS product_url_id,
+                pu.sku_id,
+                pu.shop,
+                pu.url,
+                pu.title,
+                ph.price_jpy,
+                ph.stock_status,
+                ph.scraped_at,
+                ph.scraped_date
+            FROM product_urls pu
+            JOIN price_history ph ON ph.product_url_id = pu.id
+            WHERE {where_clause}
+            ORDER BY ph.scraped_at
+            """,
             params,
         ).fetchall()
         return [dict(r) for r in rows]
@@ -630,13 +581,13 @@ def upsert_forecast_run(
             INSERT INTO forecast_runs (
                 sku_id, as_of, horizon_days, predicted_price_jpy,
                 lower_price_jpy, upper_price_jpy, model_name, features_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(sku_id, as_of, horizon_days, model_name, features_hash)
             DO UPDATE SET
-                predicted_price_jpy = excluded.predicted_price_jpy,
-                lower_price_jpy = excluded.lower_price_jpy,
-                upper_price_jpy = excluded.upper_price_jpy,
-                created_at = excluded.created_at
+                predicted_price_jpy = EXCLUDED.predicted_price_jpy,
+                lower_price_jpy = EXCLUDED.lower_price_jpy,
+                upper_price_jpy = EXCLUDED.upper_price_jpy,
+                created_at = EXCLUDED.created_at
             """,
             (
                 sku_id,
@@ -650,7 +601,6 @@ def upsert_forecast_run(
                 created_at,
             ),
         )
-        conn.commit()
 
 
 def get_latest_forecasts(*, sku_id: str, model_name: str, limit: int = 10) -> list[dict]:
@@ -659,9 +609,9 @@ def get_latest_forecasts(*, sku_id: str, model_name: str, limit: int = 10) -> li
             """
             SELECT *
             FROM forecast_runs
-            WHERE sku_id = ? AND model_name = ?
+            WHERE sku_id = %s AND model_name = %s
             ORDER BY as_of DESC, created_at DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (sku_id, model_name, limit),
         ).fetchall()
@@ -671,11 +621,11 @@ def get_latest_forecasts(*, sku_id: str, model_name: str, limit: int = 10) -> li
 def get_forecasts_for_period(
     *, sku_id: str, start_date: str, end_date: str, model_name: str | None = None
 ) -> list[dict]:
-    clauses = ["sku_id = ?", "as_of BETWEEN ? AND ?"]
+    clauses = ["sku_id = %s", "as_of BETWEEN %s AND %s"]
     params: list[Any] = [sku_id, start_date, end_date]
 
     if model_name:
-        clauses.append("model_name = ?")
+        clauses.append("model_name = %s")
         params.append(model_name)
 
     query = "SELECT * FROM forecast_runs WHERE " + " AND ".join(clauses)
@@ -704,14 +654,13 @@ def upsert_fx_rates(
         conn.executemany(
             """
             INSERT INTO fx_rates (date, base, quote, rate, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT(date, base, quote) DO UPDATE SET
-                rate = excluded.rate,
-                source = excluded.source
+                rate = EXCLUDED.rate,
+                source = EXCLUDED.source
             """,
             rows,
         )
-        conn.commit()
 
 
 def get_fx_rates(
@@ -722,8 +671,8 @@ def get_fx_rates(
             """
             SELECT date, rate
             FROM fx_rates
-            WHERE base = ? AND quote = ?
-              AND date BETWEEN ? AND ?
+            WHERE base = %s AND quote = %s
+              AND date BETWEEN %s AND %s
             ORDER BY date
             """,
             (base, quote, start_date, end_date),
@@ -734,9 +683,8 @@ def get_fx_rates(
 # -------------------------
 # Signal explanations
 # -------------------------
-def _row_to_signal_explanation(row: sqlite3.Row) -> dict[str, Any]:
-    data = dict(row)
-    return data
+def _row_to_signal_explanation(row: dict[str, Any]) -> dict[str, Any]:
+    return dict(row)
 
 
 def get_or_create_explanation(
@@ -751,48 +699,57 @@ def get_or_create_explanation(
     created_at = now_iso()
 
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM signal_explanations WHERE sku_id = ? AND signal_hash = ?",
-            (sku_id, signal_hash),
-        ).fetchone()
+        try:
+            row = conn.execute(
+                "SELECT * FROM signal_explanations WHERE sku_id = %s AND signal_hash = %s",
+                (sku_id, signal_hash),
+            ).fetchone()
+        except errors.UndefinedTable:
+            row = None
 
         if row is None:
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO signal_explanations (
-                    sku_id, signal, signal_hash, template_text, llm_text, llm_model, created_at
-                ) VALUES (?, ?, ?, ?, NULL, NULL, ?)
-                """,
-                (sku_id, signals.get("signal", ""), signal_hash, template_text, created_at),
-            )
-            conn.commit()
-            if cur.lastrowid:
-                row = conn.execute(
-                    "SELECT * FROM signal_explanations WHERE id = ?",
-                    (int(cur.lastrowid),),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT * FROM signal_explanations WHERE sku_id = ? AND signal_hash = ?",
-                    (sku_id, signal_hash),
-                ).fetchone()
+            try:
+                cur = conn.execute(
+                    """
+                    INSERT INTO signal_explanations (
+                        sku_id, signal, signal_hash, template_text, llm_text, llm_model, created_at
+                    ) VALUES (%s, %s, %s, %s, NULL, NULL, %s)
+                    ON CONFLICT (sku_id, signal_hash) DO NOTHING
+                    RETURNING *
+                    """,
+                    (sku_id, signals.get("signal", ""), signal_hash, template_text, created_at),
+                )
+                row = cur.fetchone()
+            except errors.UndefinedTable:
+                row = None
+
+            if row is None:
+                try:
+                    row = conn.execute(
+                        "SELECT * FROM signal_explanations WHERE sku_id = %s AND signal_hash = %s",
+                        (sku_id, signal_hash),
+                    ).fetchone()
+                except errors.UndefinedTable:
+                    row = None
         else:
-            if row["template_text"] != template_text:
+            if row.get("template_text") != template_text:
                 conn.execute(
                     """
                     UPDATE signal_explanations
-                    SET template_text = ?,
+                    SET template_text = %s,
                         llm_text = NULL,
                         llm_model = NULL
-                    WHERE id = ?
+                    WHERE id = %s
                     """,
-                    (template_text, row["id"]),
+                    (template_text, row.get("id")),
                 )
-                conn.commit()
-                row = conn.execute(
-                    "SELECT * FROM signal_explanations WHERE id = ?",
-                    (row["id"],),
-                ).fetchone()
+                try:
+                    row = conn.execute(
+                        "SELECT * FROM signal_explanations WHERE id = %s",
+                        (row.get("id"),),
+                    ).fetchone()
+                except errors.UndefinedTable:
+                    row = None
 
     explanation = _row_to_signal_explanation(row) if row else {}
 
@@ -810,10 +767,41 @@ def get_or_create_explanation(
             explanation["llm_text"] = llm_text
             explanation["llm_model"] = model_id
             with _connect() as conn:
-                conn.execute(
-                    "UPDATE signal_explanations SET llm_text = ?, llm_model = ? WHERE id = ?",
-                    (llm_text, model_id, explanation.get("id")),
-                )
-                conn.commit()
+                try:
+                    conn.execute(
+                        "UPDATE signal_explanations SET llm_text = %s, llm_model = %s WHERE id = %s",
+                        (llm_text, model_id, explanation.get("id")),
+                    )
+                except errors.UndefinedTable:
+                    pass
 
     return explanation
+
+
+__all__ = [
+    "ensure_schema",
+    "enqueue_review_item",
+    "list_review_items",
+    "get_review_item",
+    "update_review_suggested",
+    "save_review_draft_final",
+    "update_review_status",
+    "insert_llm_audit",
+    "insert_product",
+    "insert_alias",
+    "list_products",
+    "find_product_by_key",
+    "list_aliases_for_sku",
+    "find_alias_duplicate",
+    "list_price_targets",
+    "upsert_product_url",
+    "upsert_price_snapshot",
+    "get_latest_prices_by_sku",
+    "get_price_history",
+    "upsert_forecast_run",
+    "get_latest_forecasts",
+    "get_forecasts_for_period",
+    "upsert_fx_rates",
+    "get_fx_rates",
+    "get_or_create_explanation",
+]
