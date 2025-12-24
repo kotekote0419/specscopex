@@ -345,7 +345,7 @@ def upsert_product_url(
             ON CONFLICT (sku_id, shop, url) DO UPDATE
             SET title = COALESCE(EXCLUDED.title, product_urls.title),
                 updated_at = NOW(),
-                is_active = TRUE
+                is_active = EXCLUDED.is_active
             RETURNING id
             """,
             (sku_id, shop, url, title, is_active),
