@@ -424,6 +424,57 @@ def list_product_urls(
         return [dict(r) for r in rows]
 
 
+def list_product_urls_with_latest_price(
+    *,
+    sku_id: str | None = None,
+    include_inactive: bool = True,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    query = """
+        SELECT
+            pu.id,
+            pu.sku_id,
+            pu.shop,
+            pu.url,
+            pu.title,
+            pu.is_active,
+            pu.created_at,
+            pu.updated_at,
+            latest.price_jpy AS latest_price_jpy,
+            latest.scraped_at AS latest_scraped_at
+        FROM product_urls pu
+        LEFT JOIN LATERAL (
+            SELECT ph.price_jpy, ph.scraped_at
+            FROM price_history ph
+            WHERE ph.product_url_id = pu.id
+            ORDER BY ph.scraped_at DESC
+            LIMIT 1
+        ) latest ON TRUE
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if sku_id:
+        clauses.append("pu.sku_id = %s")
+        params.append(sku_id)
+
+    if not include_inactive:
+        clauses.append("pu.is_active IS TRUE")
+
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+
+    query += """
+        ORDER BY pu.is_active DESC, pu.updated_at DESC NULLS LAST, pu.created_at DESC NULLS LAST
+        LIMIT %s
+    """
+    params.append(limit)
+
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+
 def set_product_url_active(*, product_url_id: int, is_active: bool) -> None:
     with _connect() as conn:
         conn.execute(
@@ -442,6 +493,32 @@ def delete_product_url(*, product_url_id: int) -> None:
     # URLを削除すると、そのURL配下の価格履歴も消えます（意図どおりならOK）
     with _connect() as conn:
         conn.execute("DELETE FROM product_urls WHERE id = %s", (product_url_id,))
+
+
+def delete_product(*, sku_id: str) -> None:
+    with _connect() as conn:
+        alias_count = 0
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM product_aliases WHERE sku_id = %s",
+                (sku_id,),
+            ).fetchone()
+            alias_count = int(row["cnt"]) if row else 0
+        except errors.UndefinedTable:
+            alias_count = 0
+
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM product_urls WHERE sku_id = %s",
+            (sku_id,),
+        ).fetchone()
+        url_count = int(row["cnt"]) if row else 0
+
+        effective_alias_count = alias_count if alias_count > 0 else url_count
+        if effective_alias_count > 0:
+            raise ValueError("alias_count > 0; cannot delete product with aliases or URLs")
+
+        conn.execute("DELETE FROM product_urls WHERE sku_id = %s", (sku_id,))
+        conn.execute("DELETE FROM products WHERE sku_id = %s", (sku_id,))
 
 
 def list_aliases_for_sku(*, sku_id: str, limit: int = 200) -> list[dict[str, Any]]:
@@ -884,6 +961,11 @@ __all__ = [
     "find_product_by_key",
     "list_aliases_for_sku",
     "find_alias_duplicate",
+    "list_product_urls",
+    "list_product_urls_with_latest_price",
+    "set_product_url_active",
+    "delete_product_url",
+    "delete_product",
     "list_price_targets",
     "upsert_product_url",
     "upsert_price_snapshot",
