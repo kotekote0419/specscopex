@@ -1172,7 +1172,7 @@ elif nav == NAV_PRODUCTS:
             header = f"{display_name}  —  {sku_id}   (aliases: {alias_count})"
             with st.expander(header, expanded=False):
                 delete_disabled = alias_count > 0
-                delete_reason = "alias_count > 0 のため削除できません。" if delete_disabled else ""
+                delete_reason = "aliases または URLs が残っている場合は削除できません。" if delete_disabled else ""
                 delete_cols = st.columns([1.2, 3], gap="small")
                 with delete_cols[0]:
                     if st.button("🗑️ SKU削除", disabled=delete_disabled, key=f"sku_delete_{sku_id}"):
