@@ -22,8 +22,10 @@ from specscopex.db import (
     list_aliases_for_sku,
     list_products,
     list_product_urls,
+    list_product_urls_with_latest_price,
     set_product_url_active,
     delete_product_url,
+    delete_product,
     list_review_items,
     save_review_draft_final,
     update_review_status,
@@ -124,6 +126,23 @@ def _count_duplicates(values: list[str]) -> dict[str, int]:
             continue
         counts[vv] = counts.get(vv, 0) + 1
     return {k: c for k, c in counts.items() if c >= 2}
+
+
+def _format_price_jpy(price: Any) -> str | None:
+    try:
+        if price is None:
+            return None
+        return f"¥{int(price):,}"
+    except Exception:
+        return None
+
+
+def _format_latest_price(latest_price: Any, latest_scraped_at: Any) -> str:
+    price_text = _format_price_jpy(latest_price)
+    time_text = str(latest_scraped_at) if latest_scraped_at else None
+    if not price_text and not time_text:
+        return "最新取得: -（まだ取得なし）"
+    return f"最新取得: {price_text or '-'} / {time_text or '-'}"
 
 
 # =========================================================
@@ -369,11 +388,18 @@ if nav == NAV_ADD:
 
         include_inactive = st.toggle("無効URLも表示", value=True, key="url_mgmt_include_inactive")
 
-        urls = list_product_urls(
-            sku_id=selected_sku_id_mgmt,
-            include_inactive=include_inactive,
-            limit=500,
-        )
+        try:
+            urls = list_product_urls_with_latest_price(
+                sku_id=selected_sku_id_mgmt,
+                include_inactive=include_inactive,
+                limit=500,
+            )
+        except Exception:
+            urls = list_product_urls(
+                sku_id=selected_sku_id_mgmt,
+                include_inactive=include_inactive,
+                limit=500,
+            )
 
         if not urls:
             st.info("このSKUにはURLがまだ登録されていません。上のフォームから追加してください。")
@@ -390,6 +416,10 @@ if nav == NAV_ADD:
                 st.write(url_v)
                 if title_v:
                     st.caption(title_v)
+
+                latest_price = row.get("latest_price_jpy")
+                latest_scraped_at = row.get("latest_scraped_at")
+                st.caption(_format_latest_price(latest_price, latest_scraped_at))
 
                 c1, c2, c3 = st.columns([1.2, 1.0, 6.0], gap="small")
 
@@ -1141,6 +1171,35 @@ elif nav == NAV_PRODUCTS:
 
             header = f"{display_name}  —  {sku_id}   (aliases: {alias_count})"
             with st.expander(header, expanded=False):
+                delete_disabled = alias_count > 0
+                delete_reason = "alias_count > 0 のため削除できません。" if delete_disabled else ""
+                delete_cols = st.columns([1.2, 3], gap="small")
+                with delete_cols[0]:
+                    if st.button("🗑️ SKU削除", disabled=delete_disabled, key=f"sku_delete_{sku_id}"):
+                        st.session_state["confirm_action_token"] = f"delete_sku_{sku_id}"
+                        st.rerun()
+                with delete_cols[1]:
+                    if delete_reason:
+                        st.caption(delete_reason)
+
+                if st.session_state.get("confirm_action_token") == f"delete_sku_{sku_id}":
+                    st.warning("本当に削除しますか？SKUと関連URLを削除します。")
+                    dc1, dc2 = st.columns([1, 1], gap="small")
+                    with dc1:
+                        if st.button("削除確定", type="primary", key=f"sku_delete_confirm_{sku_id}"):
+                            try:
+                                delete_product(sku_id=sku_id)
+                                st.session_state["confirm_action_token"] = None
+                                st.success("SKUを削除しました。")
+                                st.rerun()
+                            except Exception as e:
+                                st.session_state["confirm_action_token"] = None
+                                st.error(f"削除に失敗しました: {e}")
+                    with dc2:
+                        if st.button("キャンセル", key=f"sku_delete_cancel_{sku_id}"):
+                            st.session_state["confirm_action_token"] = None
+                            st.rerun()
+
                 # ★追加改善：SKU内の重複チェック
                 urls = [_norm_str(a.get("url")) for a in aliases]
                 alias_texts = [_norm_str(a.get("alias_text")) for a in aliases]
