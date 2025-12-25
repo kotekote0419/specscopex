@@ -17,8 +17,13 @@ from specscopex.db import (
     insert_alias,
     insert_llm_audit,
     insert_product,
+    upsert_product,
+    upsert_product_url,
     list_aliases_for_sku,
     list_products,
+    list_product_urls,
+    set_product_url_active,
+    delete_product_url,
     list_review_items,
     save_review_draft_final,
     update_review_status,
@@ -161,17 +166,114 @@ nav = st.session_state["admin_nav"]
 # VIEW: Add URL
 # =========================================================
 if nav == NAV_ADD:
-    st.subheader("➕ URL追加（URLを貼って送るだけ）")
+    st.subheader("➕ URL追加")
+
+    # -----------------------------------------------------
+    # (A) 既存SKUに URL を直接追加（即時反映）
+    # -----------------------------------------------------
+    st.markdown("### 1) 既存SKUにURLを追加（即時反映）")
+    st.caption("URL解析/LLMは使いません。products（SKUマスタ）にあるSKUへ、収集対象URLを直接追加します。")
+
+    prods_all = list_products(limit=2000)
+    if not prods_all:
+        st.info("products が空です。先に Products タブでSKUを作成してください。")
+    else:
+        sku_search = st.text_input(
+            "SKU検索（display_name / model / sku_id）",
+            value="",
+            placeholder="例: 4070 / ASUS / NVIDIA_RTX...",
+            key="add_url_sku_search",
+        )
+
+        def _match(p: dict) -> bool:
+            if not sku_search.strip():
+                return True
+            q = sku_search.strip().lower()
+            return (
+                q in (p.get("sku_id") or "").lower()
+                or q in (p.get("display_name") or "").lower()
+                or q in (p.get("normalized_model") or "").lower()
+            )
+
+        prods = [p for p in prods_all if _match(p)]
+        prods = prods[:200]  # UI重くしないため上限
+
+        options = {
+            f"{p.get('display_name','(no name)')}  |  {p['sku_id']}": p["sku_id"]
+            for p in prods
+        }
+
+        if not options:
+            st.warning("検索条件に一致するSKUがありません。")
+        else:
+            c1, c2 = st.columns([2, 1], gap="large")
+            with c1:
+                selected_label = st.selectbox("SKUを選択", list(options.keys()), key="add_url_existing_sku")
+                selected_sku = options[selected_label]
+
+                shop_direct = st.text_input(
+                    "shop（ラベル）",
+                    value="dospara",
+                    placeholder="dospara / tsukumo / ark など（いまはラベル扱い）",
+                    key="add_url_shop_direct",
+                )
+                url_direct = st.text_input(
+                    "製品URL",
+                    value="",
+                    placeholder="例: https://.../item/xxxx",
+                    key="add_url_input_direct",
+                )
+                is_active_direct = st.checkbox("収集対象にする（is_active=true）", value=True, key="add_url_active_direct")
+
+            with c2:
+                st.markdown("#### メモ")
+                st.markdown("- shopは現状ラベル扱い（Generic collectorで収集）")
+                st.markdown("- URLは同一SKUでも複数ショップ追加OK")
+                st.markdown("- 重複はUNIQUEで抑制されます")
+
+            save_direct = st.button(
+                "URLを登録（即時反映）",
+                type="primary",
+                disabled=(not shop_direct.strip() or not url_direct.strip()),
+                key="add_url_save_direct",
+            )
+
+            if save_direct:
+                try:
+                    pid = upsert_product_url(
+                        sku_id=selected_sku,
+                        shop=shop_direct.strip(),
+                        url=url_direct.strip(),
+                        title=None,
+                        is_active=bool(is_active_direct),
+                    )
+                    st.success(f"登録しました（product_url_id={pid}）")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"登録に失敗しました: {e}")
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # (B) URL → LLM監査 → Inbox（従来フロー）
+    # -----------------------------------------------------
+    st.markdown("### 2) URLからSKU候補を作成（分析→Inbox）")
+    st.caption("URLの内容を抽出し、LLMで監査して Inbox に積みます（Reviewで承認/却下）。")
 
     col1, col2 = st.columns([2, 1], gap="large")
     with col1:
-        url = st.text_input("製品URL", value="", placeholder="例: https://.../item/xxxx", key="add_url_input")
-        shop = st.text_input("ショップ名（任意）", value="", placeholder="dospara / tsukumo / ark など", key="add_shop_input")
+        url = st.text_input("製品URL", value="", placeholder="例: https://.../item/xxxx", key="add_url_input_llm")
+        shop = st.text_input("ショップ名（任意）", value="", placeholder="dospara / tsukumo / ark など", key="add_shop_input_llm")
     with col2:
         st.markdown("#### コツ")
         st.markdown("- まずは専門店だけでOK\n- セット品/中古っぽい場合はReviewでReject")
 
-    add_btn = st.button("追加する（分析→Inboxへ）", type="primary", disabled=(not url.strip()), key="add_submit_btn")
+    add_btn = st.button(
+        "追加する（分析→Inboxへ）",
+        type="secondary",
+        disabled=(not url.strip()),
+        key="add_submit_btn_llm",
+    )
 
     if add_btn:
         try:
@@ -190,34 +292,32 @@ if nav == NAV_ADD:
                 payload_str = json_dumps(payload)
 
                 audit = llm_url_audit(payload_str)
-                suggested = audit.model_dump()
 
                 insert_llm_audit(
                     task_type="url_audit",
                     model_id=None,
                     prompt_version="p1",
                     schema_version=audit.schema_version,
-                    input_digest=payload_str[:5000],
-                    output_json=json_dumps(suggested),
+                    input_digest=payload_str,
+                    output_json=audit.raw_json,
                     confidence=float(audit.confidence),
                     needs_review=bool(audit.needs_review),
                 )
 
+                extracted = audit.extracted or {}
+                suggested = audit.suggested or {}
+
                 sku_payload = {
                     "source_url": ext.url,
-                    "shop": shop.strip() or None,
-                    "extracted": {
-                        "page_title": ext.title,
-                        "page_h1": ext.h1,
-                        "normalized_model": suggested.get("normalized_model"),
-                        "variant": suggested.get("variant"),
-                        "memory_gb": suggested.get("memory_gb"),
-                        "condition": suggested.get("condition"),
-                        "bundle_suspected": suggested.get("bundle_suspected"),
-                        "price_type": suggested.get("price_type"),
-                        "is_gpu_page": suggested.get("is_gpu_page"),
-                    },
+                    "source_shop": shop.strip() or None,
+                    "page_title": ext.title,
+                    "page_h1": ext.h1,
+                    "extracted": extracted,
                     "proposed": {
+                        "sku_id": suggested.get("sku_id") or "",
+                        "normalized_model": suggested.get("normalized_model") or "",
+                        "variant": suggested.get("variant") or None,
+                        "memory_gb": suggested.get("memory_gb") or None,
                         "display_name": suggested.get("normalized_model") or (ext.h1 or ext.title or "Unknown Part"),
                         "perf_score": None,
                     },
@@ -249,6 +349,77 @@ if nav == NAV_ADD:
         except Exception as e:
             st.error(f"Unexpected error: {e}")
 
+    # =========================================================
+    # (C) URL管理（既存URLの一覧・有効/無効・削除）
+    # =========================================================
+    st.divider()
+    st.subheader("🔧 URL管理（既存URLの有効/無効・削除）")
+    st.caption("※無効化すると収集ジョブの対象外になります。削除するとそのURLの価格履歴も消えます。")
+
+    products_all = list_products(limit=2000)
+    if not products_all:
+        st.info("products が空です。先に Products タブでSKUを作成してください。")
+    else:
+        # _product_label() はこのファイル上部で定義されている前提（既に使ってるはず）
+        labels = [_product_label(p) for p in products_all]
+        sku_by_label = {_product_label(p): p["sku_id"] for p in products_all}
+
+        selected_label_mgmt = st.selectbox("対象SKU", labels, index=0, key="url_mgmt_sku")
+        selected_sku_id_mgmt = sku_by_label.get(selected_label_mgmt)
+
+        include_inactive = st.toggle("無効URLも表示", value=True, key="url_mgmt_include_inactive")
+
+        urls = list_product_urls(
+            sku_id=selected_sku_id_mgmt,
+            include_inactive=include_inactive,
+            limit=500,
+        )
+
+        if not urls:
+            st.info("このSKUにはURLがまだ登録されていません。上のフォームから追加してください。")
+        else:
+            for row in urls:
+                pid = int(row["id"])
+                shop_v = (row.get("shop") or "").strip()
+                url_v = (row.get("url") or "").strip()
+                title_v = (row.get("title") or "").strip()
+                active_v = bool(row.get("is_active"))
+
+                badge = "🟢 Active" if active_v else "⚪ Inactive"
+                st.markdown(f"**{badge}**  `#{pid}`  **{shop_v or '(shop未設定)'}**")
+                st.write(url_v)
+                if title_v:
+                    st.caption(title_v)
+
+                c1, c2, c3 = st.columns([1.2, 1.0, 6.0], gap="small")
+
+                with c1:
+                    if st.button("無効化" if active_v else "有効化", key=f"url_toggle_{pid}"):
+                        set_product_url_active(product_url_id=pid, is_active=(not active_v))
+                        st.success("更新しました。")
+                        st.rerun()
+
+                with c2:
+                    if st.button("削除", key=f"url_delete_{pid}"):
+                        st.session_state["confirm_action_token"] = f"delete_purl_{pid}"
+                        st.rerun()
+
+                with c3:
+                    if st.session_state.get("confirm_action_token") == f"delete_purl_{pid}":
+                        st.warning("このURLを削除します。配下の price_history も消えます。本当に削除しますか？")
+                        cc1, cc2 = st.columns([1, 1], gap="small")
+                        with cc1:
+                            if st.button("削除確定", type="primary", key=f"url_delete_confirm_{pid}"):
+                                delete_product_url(product_url_id=pid)
+                                st.session_state["confirm_action_token"] = None
+                                st.success("削除しました。")
+                                st.rerun()
+                        with cc2:
+                            if st.button("キャンセル", key=f"url_delete_cancel_{pid}"):
+                                st.session_state["confirm_action_token"] = None
+                                st.rerun()
+
+                st.divider()
 
 # =========================================================
 # VIEW: Inbox
@@ -831,6 +1002,60 @@ elif nav == NAV_REVIEW:
 elif nav == NAV_PRODUCTS:
     st.subheader("📦 Products（SKU → alias一覧）")
     st.caption("各SKUの下で alias をすぐ確認できます（expander）。重複（URL/alias_text）も警告します。")
+
+    # =========================================================
+    # ★追加：URL不要のSKU登録（手動）フォーム
+    # =========================================================
+    st.markdown("### ➕ SKUを追加 / 更新（URL不要）")
+    st.caption("seed(json)と同じ項目でSKUマスタ(products)を作れます。URLはあとで『➕ URL追加』から入れればOKです。")
+
+    with st.form("manual_sku_upsert_form", clear_on_submit=True):
+        c1, c2 = st.columns(2, gap="large")
+        with c1:
+            sku_id_in = st.text_input(
+                "sku_id *",
+                placeholder="NVIDIA_RTX4070SUPER_ASUS_DUAL_12G など",
+            )
+            display_name_in = st.text_input(
+                "display_name *",
+                placeholder="ASUS Dual GeForce RTX 4070 SUPER 12GB など",
+            )
+            normalized_model_in = st.text_input(
+                "normalized_model（推奨）",
+                placeholder="RTX 4070 SUPER など",
+            )
+
+        with c2:
+            variant_in = st.text_input("variant（任意）", placeholder="ASUS DUAL など")
+            memory_gb_in = st.number_input("memory_gb（不明なら0）", min_value=0, max_value=64, value=0, step=1)
+            perf_score_in = st.number_input("perf_score（不明なら0）", min_value=0.0, value=0.0, step=100.0)
+
+        submitted = st.form_submit_button("保存（SKU追加/更新）", use_container_width=True)
+
+        if submitted:
+            try:
+                upsert_product(
+                    sku_id=(sku_id_in or "").strip(),
+                    display_name=(display_name_in or "").strip(),
+                    normalized_model=(normalized_model_in or "").strip() or None,
+                    variant=(variant_in or "").strip() or None,
+                    memory_gb=None if int(memory_gb_in) == 0 else int(memory_gb_in),
+                    perf_score=None if float(perf_score_in) == 0.0 else float(perf_score_in),
+                )
+                st.success("SKUを保存しました。下の一覧で確認できます。")
+                st.rerun()
+            except Exception as e:
+                st.error(f"保存に失敗しました: {e}")
+
+    # URL追加へ誘導（任意）
+    col_go, _ = st.columns([1, 3])
+    with col_go:
+        if st.button("➕ URL追加へ移動", use_container_width=True, key="goto_add_url_from_products"):
+            st.session_state["nav_target"] = NAV_ADD
+            st.rerun()
+
+    st.divider()
+
 
     topL, topR = st.columns([1, 2], gap="large")
     with topL:

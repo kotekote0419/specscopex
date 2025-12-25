@@ -246,6 +246,43 @@ def insert_product(
             (sku_id, display_name, normalized_model, variant, memory_gb, perf_score, created_at),
         )
 
+def upsert_product(
+    *,
+    sku_id: str,
+    display_name: str,
+    normalized_model: str | None = None,
+    variant: str | None = None,
+    memory_gb: int | None = None,
+    perf_score: float | None = None,
+) -> None:
+    """
+    URLなしでSKUマスタ(products)を作る/更新するための関数。
+    - sku_id が既存なら更新
+    - 新規なら追加
+    """
+    sku_id = (sku_id or "").strip()
+    display_name = (display_name or "").strip()
+
+    if not sku_id:
+        raise ValueError("sku_id is required")
+    if not display_name:
+        raise ValueError("display_name is required")
+
+    created_at = now_iso()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO products (sku_id, display_name, normalized_model, variant, memory_gb, perf_score, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (sku_id) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                normalized_model = EXCLUDED.normalized_model,
+                variant = EXCLUDED.variant,
+                memory_gb = EXCLUDED.memory_gb,
+                perf_score = EXCLUDED.perf_score
+            """,
+            (sku_id, display_name, normalized_model, variant, memory_gb, perf_score, created_at),
+        )
 
 def insert_alias(
     *,
@@ -352,6 +389,59 @@ def upsert_product_url(
         )
         row = cur.fetchone()
         return int(row["id"]) if row else 0
+
+def list_product_urls(
+    *,
+    sku_id: str | None = None,
+    include_inactive: bool = True,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    query = """
+        SELECT id, sku_id, shop, url, title, is_active, created_at, updated_at
+        FROM product_urls
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if sku_id:
+        clauses.append("sku_id = %s")
+        params.append(sku_id)
+
+    if not include_inactive:
+        clauses.append("is_active IS TRUE")
+
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+
+    query += """
+        ORDER BY is_active DESC, updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+        LIMIT %s
+    """
+    params.append(limit)
+
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_product_url_active(*, product_url_id: int, is_active: bool) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE product_urls
+            SET is_active = %s,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (is_active, product_url_id),
+        )
+
+
+def delete_product_url(*, product_url_id: int) -> None:
+    # product_urls -> price_history は ON DELETE CASCADE なので、
+    # URLを削除すると、そのURL配下の価格履歴も消えます（意図どおりならOK）
+    with _connect() as conn:
+        conn.execute("DELETE FROM product_urls WHERE id = %s", (product_url_id,))
 
 
 def list_aliases_for_sku(*, sku_id: str, limit: int = 200) -> list[dict[str, Any]]:
@@ -788,6 +878,7 @@ __all__ = [
     "update_review_status",
     "insert_llm_audit",
     "insert_product",
+    "upsert_product",
     "insert_alias",
     "list_products",
     "find_product_by_key",
