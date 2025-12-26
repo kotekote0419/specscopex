@@ -39,3 +39,8 @@ jobs:
         run: |
           export PYTHONPATH="${GITHUB_WORKSPACE}/src:${PYTHONPATH}"
           python -m specscopex.jobs.collect_prices
+
+      - name: Collect FX rates
+        run: |
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src:${PYTHONPATH}"
+          python -m specscopex.jobs.collect_fx_rates
