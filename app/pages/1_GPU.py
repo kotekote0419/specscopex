@@ -74,27 +74,6 @@ def _label_or_unknown(value: str | None) -> str:
     return value if value and str(value).strip() else "(未設定)"
 
 
-def _shorten_display_name(product: dict, max_length: int = 60) -> str:
-    display_name = product.get("display_name") or "(名称未設定)"
-    maker = _detect_manufacturer(product)
-    model = _label_or_unknown(product.get("normalized_model"))
-    variant = _label_or_unknown(product.get("variant"))
-    prefix_parts = [
-        part
-        for part in (
-            maker if maker != "不明" else None,
-            model if model != "(未設定)" else None,
-            variant if variant != "(未設定)" else None,
-        )
-        if part
-    ]
-    prefix = " / ".join(prefix_parts)
-    label = f"{prefix} - {display_name}" if prefix and display_name not in prefix else display_name
-    if len(label) <= max_length:
-        return label
-    return f"{label[: max_length - 1]}…"
-
-
 def _select_default_sku_id(
     products: list[dict],
     selected_sku_id: str | None,
@@ -115,16 +94,6 @@ def _select_default_sku_id(
             return sku_id
     sorted_products = sorted(products, key=lambda p: p.get("display_name") or "")
     return sorted_products[0].get("sku_id")
-
-
-def _order_sku_ids_with_recent(
-    products: list[dict],
-    recent_sku_ids: list[str],
-) -> list[str]:
-    product_ids = [p.get("sku_id") for p in products if p.get("sku_id")]
-    recent_ids = [sku_id for sku_id in recent_sku_ids if sku_id in product_ids]
-    remaining = [sku_id for sku_id in product_ids if sku_id not in recent_ids]
-    return recent_ids + remaining
 
 
 def _update_recent_skus(sku_id: str, max_items: int = 5) -> None:
@@ -157,7 +126,7 @@ with st.sidebar:
         st.info("モデル候補がありません。")
         st.stop()
 
-    selected_model = st.selectbox("モデル", normalized_models)
+    selected_model = st.selectbox("GPUモデル", normalized_models)
     model_filtered = [
         p for p in maker_filtered if _label_or_unknown(p.get("normalized_model")) == selected_model
     ]
@@ -167,7 +136,7 @@ with st.sidebar:
         st.info("バリアント候補がありません。")
         st.stop()
 
-    selected_variant = st.selectbox("ブランド", variants)
+    selected_variant = st.selectbox("バリエーション", variants)
     variant_filtered = [
         p for p in model_filtered if _label_or_unknown(p.get("variant")) == selected_variant
     ]
@@ -195,60 +164,40 @@ with st.sidebar:
     product_by_id = {p.get("sku_id"): p for p in variant_filtered if p.get("sku_id")}
     if st.session_state["selected_sku_id"] not in product_by_id:
         st.session_state["selected_sku_id"] = next(iter(product_by_id.keys()))
-    selected_product = product_by_id[st.session_state["selected_sku_id"]]
-    selected_display_name = selected_product.get("display_name") or "(名称未設定)"
-    st.markdown("#### 選択中のGPUモデル")
-    st.markdown(f"### {selected_display_name}")
-
-    with st.expander("別のモデルを選ぶ"):
-        ordered_sku_ids = _order_sku_ids_with_recent(
-            variant_filtered,
-            st.session_state["recent_sku_ids"],
-        )
-        if not ordered_sku_ids:
-            ordered_sku_ids = list(product_by_id.keys())
-        selected_sku_id = st.selectbox(
-            "GPUモデルを選択",
-            ordered_sku_ids,
-            format_func=lambda sku_id: _shorten_display_name(product_by_id[sku_id]),
-            key="selected_sku_id",
-        )
-
+    selected_sku_id = st.session_state["selected_sku_id"]
     if selected_sku_id and selected_sku_id != st.session_state.get("last_sku_id"):
         _update_recent_skus(selected_sku_id)
-    selected_product = product_by_id[selected_sku_id]
 
-    view_days_label = st.radio(
-        "表示期間",
-        ["7日", "30日", "90日", "全期間"],
-        horizontal=True,
-    )
     display_mode = st.selectbox(
         "表示モード",
         ["全体（最安）", "全体（平均）", "ショップ別（最安）", "ショップ別（平均）"],
     )
-    show_fx_overlay = st.toggle(
-        "USD/JPY を重ねる",
-        value=False,
-        help="DBに保存された為替レートを表示します。",
-        key="toggle_fx_overlay",
-    )
-    show_llm_comment = st.toggle(
-        "AIコメントを表示",
-        value=False,
-        help="補足コメントを生成します。",
-        key="toggle_ai_comment",
-    )
-    show_forecast_comment = st.toggle(
-        "AIで予測コメント（任意）",
-        value=False,
-        help="予測値とレンジの読み方を補足します。",
-        key="toggle_ai_forecast_comment",
-    )
+    with st.expander("詳細"):
+        show_fx_overlay = st.toggle(
+            "USD/JPY を重ねる",
+            value=False,
+            key="toggle_fx_overlay",
+        )
+        show_llm_comment = st.toggle(
+            "AIコメントを表示",
+            value=False,
+            key="toggle_ai_comment",
+        )
+        show_forecast_comment = st.toggle(
+            "AIで予測コメント（任意）",
+            value=False,
+            key="toggle_ai_forecast_comment",
+        )
+        view_days_label = st.radio(
+            "表示期間",
+            ["30日", "全期間"],
+            horizontal=True,
+        )
 
+selected_product = product_by_id[selected_sku_id]
 selected_sku = selected_product.get("sku_id")
 
-view_days = {"7日": 7, "30日": 30, "90日": 90, "全期間": None}[view_days_label]
+view_days = {"30日": 30, "全期間": None}[view_days_label]
 
 product = next((p for p in products if p["sku_id"] == selected_sku), None)
 if product:
@@ -337,7 +286,7 @@ def _persist_forecasts(sku_id: str, forecast_data: dict) -> None:
 
 
 def render_forecast_section(forecast_data: dict, comment: str | None) -> None:
-    st.markdown("### 価格予測（参考）")
+    st.markdown("### 価格予測")
     card = st.container(border=True)
     with card:
         if not forecast_data.get("ok"):
@@ -345,7 +294,7 @@ def render_forecast_section(forecast_data: dict, comment: str | None) -> None:
             st.write(f"予測不可（{reason}）")
             return
 
-        st.caption("統計モデルで算出した参考予測です。")
+        st.caption("参考値です。")
 
         raw = forecast_data.get("forecasts", {}) or {}
 
@@ -377,7 +326,7 @@ def render_forecast_section(forecast_data: dict, comment: str | None) -> None:
             st.caption(f"基準時刻: {forecast_data['as_of']}")
 
         if comment:
-            st.caption("AI補足コメント（数値はモデル算出済み）")
+            st.caption("AI補足コメント")
             st.info(comment, icon="🤖")
 
 
@@ -417,7 +366,7 @@ def _load_fx_for_prices(
 
 
 def render_signal_card(signal_data: dict) -> None:
-    st.markdown("### 買い時判定")
+    st.markdown("### 買い時")
     st.caption("🟢買い / 🟡様子見 / 🔴待ち")
     metrics = signal_data.get("metrics", {})
 
@@ -429,14 +378,15 @@ def render_signal_card(signal_data: dict) -> None:
         if metrics.get("data_insufficient"):
             st.caption("データ不足：代表値または履歴が不足しています。")
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("現在価格（代表値）", _format_price(metrics.get("price_now")))
+        col1, col2 = st.columns(2)
+        col1.metric("現在価格", _format_price(metrics.get("price_now")))
         col2.metric("30日最安比", _format_ratio(metrics.get("ratio_min")))
+        col3, col4 = st.columns(2)
         col3.metric("30日平均との差", _format_ratio(metrics.get("ratio_avg")))
         trend_label = metrics.get("trend_direction", "—")
         trend_value = metrics.get("trend7")
         trend_text = f"{trend_label} ({trend_value:.1f})" if trend_value is not None else trend_label
-        col4.metric("直近7日のトレンド", trend_text)
+        col4.metric("7日トレンド", trend_text)
 
 
 def render_explanation_block(explanation: dict, llm_enabled: bool) -> None:
@@ -451,17 +401,65 @@ def render_explanation_block(explanation: dict, llm_enabled: bool) -> None:
         st.info(explanation["llm_text"], icon="🤖")
 
 
-def render_latest(prices: list[dict]) -> None:
-    st.markdown("### 最新価格（ショップ別）")
+def _build_shop_table(prices: list[dict], mode: str) -> pd.DataFrame:
+    df = pd.DataFrame(prices)
+    if df.empty:
+        return df
+    df["scraped_at"] = pd.to_datetime(df["scraped_at"])
+    df["shop"] = df["shop"].fillna("").astype(str).str.strip().replace("", "(ショップ未設定)")
+    df = df[df["price_jpy"].notnull()]
+    if df.empty:
+        return df
+
+    if mode in {"ショップ別（最安）", "ショップ別（平均）"}:
+        agg_func = "min" if mode == "ショップ別（最安）" else "mean"
+        price_by_shop = df.groupby("shop", as_index=False)["price_jpy"].agg(agg_func)
+        if mode == "ショップ別（最安）":
+            idx = df.groupby("shop")["price_jpy"].idxmin()
+            detail = df.loc[idx, ["shop", "url", "stock_status", "scraped_at"]]
+        else:
+            detail = (
+                df.sort_values("scraped_at")
+                .groupby("shop", as_index=False)
+                .agg(
+                    {
+                        "url": "last",
+                        "stock_status": "last",
+                        "scraped_at": "max",
+                    }
+                )
+            )
+        merged = price_by_shop.merge(detail, on="shop", how="left")
+        return merged
+
+    agg_func = "min" if mode == "全体（最安）" else "mean"
+    overall_price = df["price_jpy"].agg(agg_func)
+    latest_time = df["scraped_at"].max()
+    return pd.DataFrame(
+        [
+            {
+                "shop": "全体",
+                "price_jpy": overall_price,
+                "stock_status": "",
+                "scraped_at": latest_time,
+                "url": "",
+            }
+        ]
+    )
+
+
+def render_latest(prices: list[dict], mode: str) -> None:
+    st.markdown("### 価格比較")
     if not prices:
         st.info("まだ価格が登録されていません。価格収集ジョブを実行してください。")
         return
 
-    df = pd.DataFrame(prices)
-    df["scraped_at"] = pd.to_datetime(df["scraped_at"])
-    display_cols = ["shop", "price_jpy", "stock_status", "scraped_at", "url"]
-    df = df[display_cols].sort_values("price_jpy", ascending=True)
-    df["shop"] = df["shop"].fillna("").astype(str).str.strip().replace("", "(shop未設定)")
+    df = _build_shop_table(prices, mode)
+    if df.empty:
+        st.info("価格データ（数値）が取得できていません。")
+        return
+
+    df = df.sort_values("price_jpy", ascending=True)
 
     min_row = df.loc[df["price_jpy"].idxmin()] if not df["price_jpy"].isna().all() else None
     if min_row is not None:
@@ -620,43 +618,44 @@ if not latest_df.empty and "scraped_at" in latest_df:
     latest_df["scraped_at"] = pd.to_datetime(latest_df["scraped_at"])
     latest_updated = latest_df["scraped_at"].max()
 
-metric_cols = st.columns(4)
-metric_cols[0].metric("今日の最安", _format_price(latest_min_price))
-metric_cols[1].metric("30日最安比", _format_ratio(signal.get("metrics", {}).get("ratio_min")))
-metric_cols[2].metric("30日平均との差", _format_ratio(signal.get("metrics", {}).get("ratio_avg")))
-metric_cols[3].metric(
-    "最終更新",
-    latest_updated.strftime("%Y-%m-%d %H:%M") if latest_updated is not None else "—",
-)
-
 tab_overview, tab_trend, tab_shop, tab_data = st.tabs(["概要", "推移", "ショップ", "データ"])
 
 with tab_overview:
     render_signal_card(signal)
-    st.markdown("### データ")
     metrics = signal.get("metrics", {})
+    col1, col2 = st.columns(2)
+    col1.metric("今日の最安", _format_price(latest_min_price))
+    col2.metric("30日最安比", _format_ratio(metrics.get("ratio_min")))
+    col3, col4 = st.columns(2)
+    col3.metric("30日平均との差", _format_ratio(metrics.get("ratio_avg")))
+    col4.metric(
+        "最終更新",
+        latest_updated.strftime("%Y-%m-%d %H:%M") if latest_updated is not None else "—",
+    )
+
+    st.markdown("### 根拠")
     reasons = [
-        f"現在の代表価格: {_format_price(metrics.get('price_now'))}",
-        f"直近30日最安: {_format_price(metrics.get('price_min30'))}",
-        f"直近30日平均との差: {_format_ratio(metrics.get('ratio_avg'))}",
-        f"直近30日最安比: {_format_ratio(metrics.get('ratio_min'))}",
+        ("現在の代表価格", _format_price(metrics.get("price_now"))),
+        ("直近30日最安", _format_price(metrics.get("price_min30"))),
+        ("直近30日平均との差", _format_ratio(metrics.get("ratio_avg"))),
+        ("直近30日最安比", _format_ratio(metrics.get("ratio_min"))),
     ]
-    if latest_updated is not None:
-        reasons.append(f"最終更新: {latest_updated.strftime('%Y-%m-%d %H:%M')}")
     stock_hint = _build_stock_hint(latest_prices)
     if stock_hint:
-        reasons.append(stock_hint)
-    st.markdown("\n".join([f"- {item}" for item in reasons]))
+        reasons.append(("在庫状況", stock_hint))
+    if latest_updated is not None:
+        reasons.append(("最終更新", latest_updated.strftime("%Y-%m-%d %H:%M")))
+    st.table(pd.DataFrame(reasons, columns=["項目", "値"]))
 
-    with st.expander("詳しい解説を見る"):
+    with st.expander("詳細"):
         render_explanation_block(explanation, show_llm_comment)
-    with st.expander("予測", expanded=False):
         render_forecast_section(forecast_result, forecast_comment)
 
 with tab_trend:
     fx_view: list[dict] | None = None
     if show_fx_overlay:
         fx_view = _load_fx_for_prices(history_view, fx_cache)
+        st.caption("為替は日次収集（Actionsと同時）")
 
     view_label = view_days_label if view_days is not None else "全期間"
     render_history(
@@ -694,7 +693,7 @@ with tab_trend:
             st.caption("為替データ未更新（最新分がまだありません）")
 
 with tab_shop:
-    render_latest(latest_prices)
+    render_latest(latest_prices, display_mode)
 
 with tab_data:
     st.markdown("### 価格履歴（Raw）")
