@@ -59,28 +59,65 @@ if not products:
     st.warning("プロダクトデータがまだありません。価格収集ジョブ実行後に再度お試しください。")
     st.stop()
 
+def _detect_manufacturer(product: dict) -> str:
+    sku_id = (product.get("sku_id") or "").upper()
+    normalized = (product.get("normalized_model") or "").upper()
+
+    if sku_id.startswith("NVIDIA_") or normalized.startswith(("RTX", "GTX", "QUADRO", "A")):
+        return "NVIDIA"
+    if sku_id.startswith("AMD_") or normalized.startswith(("RX", "RADEON")):
+        return "AMD"
+    return "不明"
+
+
+def _label_or_unknown(value: str | None) -> str:
+    return value if value and str(value).strip() else "(未設定)"
+
+
 with st.sidebar:
     st.header("表示設定", divider=True)
-    search_query = st.text_input("モデル検索", placeholder="例: RTX 4090 / 4090D / 24GB")
-    query = search_query.strip().lower()
 
-    filtered_products = products
-    if query:
-        filtered_products = [
-            p
-            for p in products
-            if query in (p.get("display_name") or "").lower()
-            or query in (p.get("sku_id") or "").lower()
-            or query in (p.get("normalized_model") or "").lower()
-        ]
-        if not filtered_products:
-            st.info("一致するGPUモデルがありません。検索条件を変更してください。")
-            filtered_products = products
+    maker_options = ["すべて", "NVIDIA", "AMD"]
+    maker_choice = st.selectbox("メーカー", maker_options)
 
-    options = {
-        f"{p['display_name']}（型番: {p['sku_id']}）": p["sku_id"] for p in filtered_products
-    }
-    selected_label = st.selectbox("GPUモデルを選択", list(options.keys()))
+    products_with_maker = [{**p, "maker": _detect_manufacturer(p)} for p in products]
+    maker_filtered = (
+        products_with_maker
+        if maker_choice == "すべて"
+        else [p for p in products_with_maker if p["maker"] == maker_choice]
+    )
+
+    normalized_models = sorted(
+        {_label_or_unknown(p.get("normalized_model")) for p in maker_filtered}
+    )
+    if not normalized_models:
+        st.info("モデル候補がありません。")
+        st.stop()
+
+    selected_model = st.selectbox("モデル", normalized_models)
+    model_filtered = [
+        p for p in maker_filtered if _label_or_unknown(p.get("normalized_model")) == selected_model
+    ]
+
+    variants = sorted({_label_or_unknown(p.get("variant")) for p in model_filtered})
+    if not variants:
+        st.info("バリアント候補がありません。")
+        st.stop()
+
+    selected_variant = st.selectbox("バリアント", variants)
+    variant_filtered = [
+        p for p in model_filtered if _label_or_unknown(p.get("variant")) == selected_variant
+    ]
+
+    if not variant_filtered:
+        st.info("該当するGPUモデルがありません。条件を変更してください。")
+        st.stop()
+
+    selected_product = st.selectbox(
+        "GPUモデルを選択",
+        variant_filtered,
+        format_func=lambda p: p.get("display_name") or "(名称未設定)",
+    )
     view_days_label = st.radio(
         "表示期間",
         ["7日", "30日", "90日", "全期間"],
@@ -109,16 +146,15 @@ with st.sidebar:
         key="toggle_ai_forecast_comment",
     )
 
-selected_sku = options[selected_label]
+selected_sku = selected_product.get("sku_id")
 
 view_days = {"7日": 7, "30日": 30, "90日": 90, "全期間": None}[view_days_label]
 
 product = next((p for p in products if p["sku_id"] == selected_sku), None)
 if product:
     st.subheader(product["display_name"])
-    st.caption(f"型番: {product['sku_id']}")
 else:
-    st.subheader(selected_sku)
+    st.subheader("選択したGPU")
 
 latest_prices = load_latest_prices(selected_sku)
 history_30 = load_price_history(selected_sku, days=30)
@@ -535,6 +571,14 @@ with tab_trend:
     )
 
     if show_fx_overlay:
+        latest_price_date = None
+        price_df = _prepare_price_frame(history_view)
+        if not price_df.empty:
+            if "scraped_date" in price_df.columns:
+                latest_price_date = price_df["scraped_date"].max()
+            else:
+                latest_price_date = price_df["scraped_at"].dt.date.max()
+
         latest_fx_date = None
         if fx_view:
             fx_dates = [
@@ -543,7 +587,10 @@ with tab_trend:
                 if item.get("date") is not None
             ]
             latest_fx_date = max(fx_dates) if fx_dates else None
-        if latest_fx_date is None or latest_fx_date < date.today():
+
+        if latest_fx_date is None or (
+            latest_price_date is not None and latest_fx_date < latest_price_date
+        ):
             st.caption("為替データ未更新（最新分がまだありません）")
 
 with tab_shop:
