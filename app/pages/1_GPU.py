@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -20,14 +22,13 @@ from specscopex.fx import fetch_usd_jpy_rates
 from specscopex.fx_summary import summarize_usd_jpy
 from specscopex.llm import LLMError, llm_explain_forecast
 from specscopex.signals import compute_signal
-from datetime import date, timedelta
 
 
 st.set_page_config(page_title="GPU", page_icon="🖥️", layout="wide")
 ensure_schema()
 
 st.title("GPU 価格ダッシュボード")
-st.caption("SKUごとの最新価格と推移を確認できます。")
+st.caption("意思決定に必要な情報を、結論 → 根拠 → 推移 → データの順に整理します。")
 
 
 @st.cache_data(show_spinner=False)
@@ -50,14 +51,52 @@ def load_fx_rates(base: str, quote: str, start_date: str, end_date: str) -> list
     return get_fx_rates(base=base, quote=quote, start_date=start_date, end_date=end_date)
 
 
+@st.cache_data(show_spinner=False)
+def load_forecast(history: list[dict]) -> dict:
+    return compute_forecast(history)
+
+
 products = load_products()
 if not products:
     st.warning("プロダクトデータがまだありません。価格収集ジョブ実行後に再度お試しください。")
     st.stop()
 
 options = {f"{p['display_name']} ({p['sku_id']})": p["sku_id"] for p in products}
-selected_label = st.selectbox("SKU を選択", list(options.keys()))
+
+with st.sidebar:
+    st.header("表示設定", divider=True)
+    selected_label = st.selectbox("SKU を選択", list(options.keys()))
+    view_days_label = st.radio(
+        "表示期間",
+        ["7日", "30日", "90日", "全期間"],
+        horizontal=True,
+    )
+    display_mode = st.selectbox(
+        "表示モード",
+        ["集約（最安）", "集約（平均）", "ショップ別"],
+    )
+    show_fx_overlay = st.toggle(
+        "USD/JPY を重ねる",
+        value=False,
+        help="Frankfurter APIの為替レートを第2軸で表示します（ネットワークに依存）。",
+        key="toggle_fx_overlay",
+    )
+    show_llm_comment = st.toggle(
+        "AIコメントを表示",
+        value=False,
+        help="テンプレ根拠に加えて補足コメントを生成します（同条件はキャッシュされます）。",
+        key="toggle_ai_comment",
+    )
+    show_forecast_comment = st.toggle(
+        "AIで予測コメント（任意）",
+        value=False,
+        help="予測値とレンジの読み方を1〜2文で補足します（数値はモデル算出固定）。",
+        key="toggle_ai_forecast_comment",
+    )
+
 selected_sku = options[selected_label]
+
+view_days = {"7日": 7, "30日": 30, "90日": 90, "全期間": None}[view_days_label]
 
 product = next((p for p in products if p["sku_id"] == selected_sku), None)
 if product:
@@ -68,8 +107,9 @@ else:
 latest_prices = load_latest_prices(selected_sku)
 history_30 = load_price_history(selected_sku, days=30)
 history_all = load_price_history(selected_sku, days=None)
+history_view = history_all if view_days is None else load_price_history(selected_sku, days=view_days)
 signal = compute_signal(latest_prices, history_30)
-forecast_result = compute_forecast(history_all)
+forecast_result = load_forecast(history_all)
 
 
 def _format_price(price: float | int | None) -> str:
@@ -286,50 +326,91 @@ def render_latest(prices: list[dict]) -> None:
 
     df = pd.DataFrame(prices)
     df["scraped_at"] = pd.to_datetime(df["scraped_at"])
-    display_cols = ["shop", "price_jpy", "stock_status", "scraped_at", "url", "title"]
+    display_cols = ["shop", "price_jpy", "stock_status", "scraped_at", "url"]
+    df = df[display_cols].sort_values("price_jpy", ascending=True)
+
+    min_row = df.loc[df["price_jpy"].idxmin()] if not df["price_jpy"].isna().all() else None
+    if min_row is not None:
+        st.success(
+            f"最安: {min_row['shop']} / {_format_price(min_row['price_jpy'])}",
+            icon="🏷️",
+        )
 
     st.dataframe(
-        df[display_cols].rename(
+        df.rename(
             columns={
                 "shop": "ショップ",
                 "price_jpy": "価格(JPY)",
                 "stock_status": "在庫ステータス",
                 "scraped_at": "取得時刻",
                 "url": "URL",
-                "title": "ページタイトル",
             }
         ),
         use_container_width=True,
         hide_index=True,
     )
 
+    with st.expander("ショップへのリンク"):
+        for _, row in df.iterrows():
+            if not row.get("url"):
+                continue
+            label = f"{row['shop']} ({_format_price(row['price_jpy'])})"
+            st.link_button(label, row["url"])
+
+
+def _prepare_price_frame(prices: list[dict]) -> pd.DataFrame:
+    df = pd.DataFrame(prices)
+    if df.empty:
+        return df
+
+    df = df[df["price_jpy"].notnull()]
+    if df.empty:
+        return df
+
+    df["scraped_at"] = pd.to_datetime(df["scraped_at"])
+    return df
+
 
 def render_history(
-    prices: list[dict], title: str, chart_key: str, fx_rates: list[dict] | None = None
+    prices: list[dict],
+    title: str,
+    chart_key: str,
+    mode: str,
+    fx_rates: list[dict] | None = None,
 ) -> None:
     st.markdown(f"### {title}")
     if not prices:
         st.info("表示できる価格履歴がまだありません。")
         return
 
-    df = pd.DataFrame(prices)
-    df = df[df["price_jpy"].notnull()]
+    df = _prepare_price_frame(prices)
     if df.empty:
         st.info("価格データ（数値）が取得できていません。")
         return
 
-    df["scraped_at"] = pd.to_datetime(df["scraped_at"])
-
-    fig = px.line(
-        df,
-        x="scraped_at",
-        y="price_jpy",
-        color="shop",
-        markers=True,
-        hover_data={"url": True, "title": True, "stock_status": True},
-        labels={"scraped_at": "取得時刻", "price_jpy": "価格(JPY)", "shop": "ショップ"},
-    )
-    fig.update_layout(height=420, legend_title_text="ショップ")
+    if mode in {"集約（最安）", "集約（平均）"}:
+        df["date"] = df["scraped_at"].dt.date
+        agg_func = "min" if mode == "集約（最安）" else "mean"
+        aggregated = df.groupby("date", as_index=False)["price_jpy"].agg(agg_func)
+        fig = px.line(
+            aggregated,
+            x="date",
+            y="price_jpy",
+            markers=True,
+            labels={"date": "日付", "price_jpy": "価格(JPY)"},
+        )
+        fig.update_layout(height=420, showlegend=False)
+    else:
+        fig = px.line(
+            df,
+            x="scraped_at",
+            y="price_jpy",
+            color="shop",
+            markers=True,
+            hover_data={"url": True, "title": True, "stock_status": True},
+            labels={"scraped_at": "取得時刻", "price_jpy": "価格(JPY)", "shop": "ショップ"},
+        )
+        fig.update_layout(height=420, legend_title_text="ショップ")
 
     if fx_rates:
         fx_df = pd.DataFrame(fx_rates)
@@ -359,19 +440,6 @@ _persist_forecasts(selected_sku, forecast_result)
 fx_cache: dict[tuple[str, str], list[dict]] = {}
 fx_failure = {"failed": False}
 fx_rates_for_summary: list[dict] | None = None
-show_llm_comment = st.toggle(
-    "AIコメントを表示",
-    value=False,
-    help="テンプレ根拠に加えて補足コメントを生成します（同条件はキャッシュされます）。",
-    key=f"toggle_ai_comment_{selected_sku}",
-)
-
-show_forecast_comment = st.toggle(
-    "AIで予測コメント（任意）",
-    value=False,
-    help="予測値とレンジの読み方を1〜2文で補足します（数値はモデル算出固定）。",
-    key=f"toggle_ai_forecast_comment_{selected_sku}",
-)
 
 if show_llm_comment or show_forecast_comment:
     fx_rates_for_summary = _load_fx_for_prices(history_30, fx_cache, fx_failure)
@@ -405,45 +473,67 @@ if forecast_result.get("ok") and show_forecast_comment:
     except LLMError:
         forecast_comment = None
 
-render_signal_card(signal)
-render_forecast_section(forecast_result, forecast_comment)
-render_explanation_block(explanation, show_llm_comment)
+latest_df = pd.DataFrame(latest_prices)
+latest_min_price = None
+latest_updated = None
+if not latest_df.empty and "price_jpy" in latest_df:
+    latest_min_price = latest_df["price_jpy"].min()
+if not latest_df.empty and "scraped_at" in latest_df:
+    latest_df["scraped_at"] = pd.to_datetime(latest_df["scraped_at"])
+    latest_updated = latest_df["scraped_at"].max()
 
-render_latest(latest_prices)
-
-show_fx_overlay = st.checkbox(
-    "USD/JPY を重ねて表示",
-    value=False,
-    help="Frankfurter APIの為替レートを第2軸で表示します（ネットワークに依存）。",
-    key=f"toggle_fx_overlay_{selected_sku}",
+metric_cols = st.columns(4)
+metric_cols[0].metric("今日の最安", _format_price(latest_min_price))
+metric_cols[1].metric("30日最安比", _format_ratio(signal.get("metrics", {}).get("ratio_min")))
+metric_cols[2].metric("30日平均との差", _format_ratio(signal.get("metrics", {}).get("ratio_avg")))
+metric_cols[3].metric(
+    "最終更新",
+    latest_updated.strftime("%Y-%m-%d %H:%M") if latest_updated is not None else "—",
 )
 
-fx_30d: list[dict] | None = None
-fx_all: list[dict] | None = None
+tab_overview, tab_trend, tab_shop, tab_data = st.tabs(["概要", "推移", "ショップ", "データ"])
 
-if show_fx_overlay:
-    fx_30d = (
-        fx_rates_for_summary
-        if fx_rates_for_summary is not None
-        else _load_fx_for_prices(history_30, fx_cache, fx_failure)
-    )
-    fx_all = _load_fx_for_prices(history_all, fx_cache, fx_failure)
+with tab_overview:
+    render_signal_card(signal)
+    with st.expander("根拠", expanded=True):
+        render_explanation_block(explanation, show_llm_comment)
+    with st.expander("予測", expanded=False):
+        render_forecast_section(forecast_result, forecast_comment)
 
-col1, col2 = st.columns(2)
-with col1:
+with tab_trend:
+    fx_view: list[dict] | None = None
+    if show_fx_overlay:
+        fx_view = _load_fx_for_prices(history_view, fx_cache, fx_failure)
+
+    view_label = view_days_label if view_days is not None else "全期間"
     render_history(
-        history_30,
-        "直近30日の価格推移",
-        chart_key=f"price_chart_30d_{selected_sku}_{'fx' if show_fx_overlay else 'no_fx'}",
-        fx_rates=fx_30d,
-    )
-with col2:
-    render_history(
-        history_all,
-        "全期間の価格推移",
-        chart_key=f"price_chart_all_{selected_sku}_{'fx' if show_fx_overlay else 'no_fx'}",
-        fx_rates=fx_all,
+        history_view,
+        f"価格推移（{view_label}）",
+        chart_key=(
+            f"price_chart_view_{selected_sku}_{view_label}_{display_mode}_"
+            f"{'fx' if show_fx_overlay else 'no_fx'}"
+        ),
+        mode=display_mode,
+        fx_rates=fx_view,
     )
 
-if show_fx_overlay and fx_failure.get("failed"):
-    st.caption("USD/JPY取得失敗")
+    if show_fx_overlay and fx_failure.get("failed"):
+        st.caption("USD/JPY取得失敗")
+
+with tab_shop:
+    render_latest(latest_prices)
+
+with tab_data:
+    st.markdown("### 価格履歴（Raw）")
+    history_df = pd.DataFrame(history_all)
+    if history_df.empty:
+        st.info("表示できる価格履歴がまだありません。")
+    else:
+        st.dataframe(history_df, use_container_width=True, hide_index=True)
+        csv_data = history_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "CSVをダウンロード",
+            data=csv_data,
+            file_name=f"{selected_sku}_price_history.csv",
+            mime="text/csv",
+        )

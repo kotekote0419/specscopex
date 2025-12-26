@@ -2,7 +2,7 @@ name: Daily price collection
 
 on:
   schedule:
-    # JST 00:20 = UTC 15:20
+    # JST 10:20 = UTC 01:20
     - cron: "20 1 * * *"
   workflow_dispatch:
 
