@@ -645,9 +645,14 @@ with tab_overview:
         reasons.append(("在庫状況", stock_hint))
     if latest_updated is not None:
         reasons.append(("最終更新", latest_updated.strftime("%Y-%m-%d %H:%M")))
-    st.table(pd.DataFrame(reasons, columns=["項目", "値"]))
+    reason_df = pd.DataFrame(reasons, columns=["項目", "値"])
+    st.dataframe(
+        reason_df,
+        use_container_width=True,
+        hide_index=True,
+    )
 
-    with st.expander("詳細"):
+    with st.expander("詳細/予測"):
         render_explanation_block(explanation, show_llm_comment)
         render_forecast_section(forecast_result, forecast_comment)
 
