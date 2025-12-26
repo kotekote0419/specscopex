@@ -1,10 +1,6 @@
 name: Daily price collection
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - ".github/workflows/collect_prices.yml"
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
