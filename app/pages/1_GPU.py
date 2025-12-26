@@ -97,6 +97,7 @@ def _shorten_display_name(product: dict, max_length: int = 60) -> str:
 
 def _select_default_sku_id(
     products: list[dict],
+    selected_sku_id: str | None,
     recent_sku_ids: list[str],
     last_sku_id: str | None,
 ) -> str | None:
@@ -105,6 +106,8 @@ def _select_default_sku_id(
     if len(products) == 1:
         return products[0].get("sku_id")
     candidate_ids = {p.get("sku_id") for p in products}
+    if selected_sku_id in candidate_ids:
+        return selected_sku_id
     if last_sku_id in candidate_ids:
         return last_sku_id
     for sku_id in recent_sku_ids:
@@ -114,16 +117,14 @@ def _select_default_sku_id(
     return sorted_products[0].get("sku_id")
 
 
-def _order_products_with_recent(
+def _order_sku_ids_with_recent(
     products: list[dict],
     recent_sku_ids: list[str],
-) -> list[dict]:
-    if not products:
-        return []
-    product_by_id = {p.get("sku_id"): p for p in products}
-    recent_products = [product_by_id[sku_id] for sku_id in recent_sku_ids if sku_id in product_by_id]
-    remaining = [p for p in products if p.get("sku_id") not in recent_sku_ids]
-    return recent_products + remaining
+) -> list[str]:
+    product_ids = [p.get("sku_id") for p in products if p.get("sku_id")]
+    recent_ids = [sku_id for sku_id in recent_sku_ids if sku_id in product_ids]
+    remaining = [sku_id for sku_id in product_ids if sku_id not in recent_ids]
+    return recent_ids + remaining
 
 
 def _update_recent_skus(sku_id: str, max_items: int = 5) -> None:
@@ -179,41 +180,43 @@ with st.sidebar:
         st.session_state["recent_sku_ids"] = []
     if "last_sku_id" not in st.session_state:
         st.session_state["last_sku_id"] = None
+    if "selected_sku_id" not in st.session_state:
+        st.session_state["selected_sku_id"] = None
 
-    default_sku_id = _select_default_sku_id(
-        variant_filtered,
-        st.session_state["recent_sku_ids"],
-        st.session_state["last_sku_id"],
-    )
-    selected_product = next(
-        (p for p in variant_filtered if p.get("sku_id") == default_sku_id),
-        variant_filtered[0],
-    )
+    filter_key = (maker_choice, selected_model, selected_variant)
+    if st.session_state.get("filter_key") != filter_key:
+        st.session_state["filter_key"] = filter_key
+        st.session_state["selected_sku_id"] = _select_default_sku_id(
+            variant_filtered,
+            st.session_state.get("selected_sku_id"),
+            st.session_state["recent_sku_ids"],
+            st.session_state["last_sku_id"],
+        )
+    product_by_id = {p.get("sku_id"): p for p in variant_filtered if p.get("sku_id")}
+    if st.session_state["selected_sku_id"] not in product_by_id:
+        st.session_state["selected_sku_id"] = next(iter(product_by_id.keys()))
+    selected_product = product_by_id[st.session_state["selected_sku_id"]]
     selected_display_name = selected_product.get("display_name") or "(名称未設定)"
     st.markdown("#### 選択中のGPUモデル")
     st.markdown(f"### {selected_display_name}")
 
     with st.expander("別のモデルを選ぶ"):
-        ordered_products = _order_products_with_recent(
+        ordered_sku_ids = _order_sku_ids_with_recent(
             variant_filtered,
             st.session_state["recent_sku_ids"],
         )
-        option_skus = {p.get("sku_id") for p in ordered_products}
-        current = st.session_state.get("gpu_model_selectbox")
-        current_sku = current.get("sku_id") if isinstance(current, dict) else None
-        if current_sku not in option_skus:
-            st.session_state["gpu_model_selectbox"] = selected_product
-
-        selected_product = st.selectbox(
+        if not ordered_sku_ids:
+            ordered_sku_ids = list(product_by_id.keys())
+        selected_sku_id = st.selectbox(
             "GPUモデルを選択",
-            ordered_products,
-            format_func=_shorten_display_name,
-            key="gpu_model_selectbox",
+            ordered_sku_ids,
+            format_func=lambda sku_id: _shorten_display_name(product_by_id[sku_id]),
+            key="selected_sku_id",
         )
 
-    selected_sku_id = selected_product.get("sku_id")
     if selected_sku_id and selected_sku_id != st.session_state.get("last_sku_id"):
         _update_recent_skus(selected_sku_id)
+    selected_product = product_by_id[selected_sku_id]
 
     view_days_label = st.radio(
         "表示期間",
