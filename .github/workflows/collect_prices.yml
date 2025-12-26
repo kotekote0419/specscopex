@@ -1,8 +1,11 @@
 name: Daily price collection
 
 on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/collect_prices.yml"
   schedule:
-    # JST 10:20 = UTC 01:20
     - cron: "*/10 * * * *"
   workflow_dispatch:
 
