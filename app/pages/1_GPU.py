@@ -26,7 +26,7 @@ st.set_page_config(page_title="GPU", page_icon="🖥️", layout="wide")
 ensure_schema()
 
 st.title("GPU 価格ダッシュボード")
-st.caption("GPU価格の判断材料を、シンプルにまとめます。")
+st.caption("買い時判定と価格推移を、ひと目で。")
 
 
 @st.cache_data(show_spinner=False)
@@ -104,7 +104,7 @@ with st.sidebar:
         st.info("バリアント候補がありません。")
         st.stop()
 
-    selected_variant = st.selectbox("バリアント", variants)
+    selected_variant = st.selectbox("ブランド", variants)
     variant_filtered = [
         p for p in model_filtered if _label_or_unknown(p.get("variant")) == selected_variant
     ]
@@ -130,19 +130,19 @@ with st.sidebar:
     show_fx_overlay = st.toggle(
         "USD/JPY を重ねる",
         value=False,
-        help="DBに保存された為替レートを第2軸で表示します。",
+        help="DBに保存された為替レートを表示します。",
         key="toggle_fx_overlay",
     )
     show_llm_comment = st.toggle(
         "AIコメントを表示",
         value=False,
-        help="テンプレ根拠に加えて補足コメントを生成します（同条件はキャッシュされます）。",
+        help="補足コメントを生成します。",
         key="toggle_ai_comment",
     )
     show_forecast_comment = st.toggle(
         "AIで予測コメント（任意）",
         value=False,
-        help="予測値とレンジの読み方を1〜2文で補足します（数値はモデル算出固定）。",
+        help="予測値とレンジの読み方を補足します。",
         key="toggle_ai_forecast_comment",
     )
 
@@ -318,7 +318,7 @@ def _load_fx_for_prices(
 
 def render_signal_card(signal_data: dict) -> None:
     st.markdown("### 買い時判定")
-    st.caption("凡例: 🟢買い / 🟡様子見 / 🔴待ち")
+    st.caption("🟢買い / 🟡様子見 / 🔴待ち")
     metrics = signal_data.get("metrics", {})
 
     card = st.container(border=True)
@@ -533,7 +533,7 @@ tab_overview, tab_trend, tab_shop, tab_data = st.tabs(["概要", "推移", "シ�
 
 with tab_overview:
     render_signal_card(signal)
-    st.markdown("### 根拠データ")
+    st.markdown("### データ")
     metrics = signal.get("metrics", {})
     reasons = [
         f"現在の代表価格: {_format_price(metrics.get('price_now'))}",
