@@ -31,6 +31,7 @@ from specscopex.db import (
     update_review_status,
     update_review_suggested,
 )
+from specscopex.jobs.collect_prices import HARD_LIMIT_MAX_URLS, run_collect_prices
 from specscopex.llm import LLMError, llm_url_audit
 from specscopex.utils import json_dumps, json_loads
 
@@ -1032,6 +1033,97 @@ elif nav == NAV_REVIEW:
 elif nav == NAV_PRODUCTS:
     st.subheader("📦 Products（SKU → alias一覧）")
     st.caption("各SKUの下で alias をすぐ確認できます（expander）。重複（URL/alias_text）も警告します。")
+
+    # =========================================================
+    # 🚀 収集ジョブを今すぐ実行
+    # =========================================================
+    st.markdown("### 🚀 収集ジョブを今すぐ実行")
+    st.caption("GitHub Actionsを待たずに価格収集ジョブを手動実行できます。")
+
+    products_for_collect = list_products(limit=2000)
+    sku_label_map: dict[str, str | None] = {"全SKU": None}
+    for p in products_for_collect:
+        sku_id = p.get("sku_id")
+        if not sku_id:
+            continue
+        sku_label_map[_product_label(p)] = sku_id
+
+    selected_label = st.selectbox(
+        "実行対象SKU",
+        list(sku_label_map.keys()),
+        key="collect_prices_sku_select",
+    )
+    selected_sku_id = sku_label_map[selected_label]
+
+    c1, c2, c3 = st.columns([1, 1, 1], gap="large")
+    with c1:
+        only_active = st.toggle("有効URLのみ", value=True, key="collect_prices_only_active")
+    with c2:
+        max_urls = st.number_input(
+            "件数制限（max）",
+            min_value=1,
+            max_value=HARD_LIMIT_MAX_URLS,
+            value=30,
+            step=1,
+            key="collect_prices_max_urls",
+        )
+    with c3:
+        dry_run = st.toggle("Dry-run（対象URL件数のみ表示）", value=False, key="collect_prices_dry_run")
+
+    st.caption(f"ハード上限: {HARD_LIMIT_MAX_URLS} URL（コード側でも制限）")
+
+    if st.button("収集を実行", type="primary", key="collect_prices_run"):
+        st.session_state["confirm_action_token"] = "run_collect_prices"
+        st.rerun()
+
+    if st.session_state.get("confirm_action_token") == "run_collect_prices":
+        st.warning("収集ジョブを実行しますか？（キャンセル可能）")
+        confirm_cols = st.columns([1, 1], gap="small")
+        with confirm_cols[0]:
+            if st.button("実行確定", type="primary", key="collect_prices_confirm"):
+                st.session_state["confirm_action_token"] = None
+                log_lines: list[str] = []
+                log_area = st.empty()
+
+                def _ui_logger(message: str) -> None:
+                    log_lines.append(message)
+                    log_area.code("\n".join(log_lines))
+
+                try:
+                    with st.spinner("収集中..."):
+                        result = run_collect_prices(
+                            sku_id=selected_sku_id,
+                            only_active=only_active,
+                            limit=int(max_urls),
+                            logger=_ui_logger,
+                            dry_run=dry_run,
+                        )
+                    st.success("収集ジョブが完了しました。")
+
+                    st.markdown("#### 実行結果サマリ")
+                    st.write(
+                        {
+                            "対象URL件数": result.get("target_count"),
+                            "処理件数": result.get("processed_count"),
+                            "成功件数": result.get("success_count"),
+                            "失敗件数": result.get("failure_count"),
+                            "最新scraped_at": result.get("latest_scraped_at") or "-",
+                            "実行上限": result.get("limit"),
+                        }
+                    )
+
+                    failures = result.get("failures") or []
+                    if failures:
+                        with st.expander("失敗したURL一覧", expanded=False):
+                            st.dataframe(failures, use_container_width=True, hide_index=True)
+                except Exception as e:
+                    st.error(f"収集ジョブの実行に失敗しました: {e}")
+        with confirm_cols[1]:
+            if st.button("キャンセル", key="collect_prices_cancel"):
+                st.session_state["confirm_action_token"] = None
+                st.rerun()
+
+    st.divider()
 
     # =========================================================
     # ★追加：URL不要のSKU登録（手動）フォーム

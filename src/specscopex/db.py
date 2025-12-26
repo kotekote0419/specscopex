@@ -601,21 +601,38 @@ def find_alias_duplicate(
 # -------------------------
 # Price history
 # -------------------------
-def list_price_targets(limit: int = 1000) -> list[dict[str, Any]]:
+def list_price_targets(
+    limit: int = 1000,
+    *,
+    sku_id: str | None = None,
+    only_active: bool = True,
+) -> list[dict[str, Any]]:
     """
     Enumerate URLs to be scraped. Prefers product_urls over legacy aliases.
-    Only active URLs are returned.
     """
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if only_active:
+        clauses.append("is_active IS TRUE")
+    if sku_id:
+        clauses.append("sku_id = %s")
+        params.append(sku_id)
+
+    where_clause = ""
+    if clauses:
+        where_clause = "WHERE " + " AND ".join(clauses)
+
     with _connect() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT sku_id, shop, url, id AS product_url_id
             FROM product_urls
-            WHERE is_active IS TRUE
+            {where_clause}
             ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
             LIMIT %s
             """,
-            (limit,),
+            (*params, limit),
         ).fetchall()
         if rows:
             return [dict(r) for r in rows]
@@ -625,11 +642,13 @@ def list_price_targets(limit: int = 1000) -> list[dict[str, Any]]:
                 """
                 SELECT sku_id, shop, url, NULL::bigint AS product_url_id
                 FROM product_aliases
-                WHERE url IS NOT NULL AND TRIM(url) != ''
+                WHERE url IS NOT NULL
+                  AND TRIM(url) != ''
+                  AND (%s IS NULL OR sku_id = %s)
                 ORDER BY created_at DESC NULLS LAST
                 LIMIT %s
                 """,
-                (limit,),
+                (sku_id, sku_id, limit),
             ).fetchall()
             return [dict(r) for r in legacy_rows]
         except errors.UndefinedTable:

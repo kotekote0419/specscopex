@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from ..collectors.price import PriceResult, collect_price
 from ..db import (
@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 JST = timezone(timedelta(hours=9))
 UNKNOWN_SHOP = "unknown"
+HARD_LIMIT_MAX_URLS = 200
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,109 @@ def main() -> None:
     ensure_schema()
     targets = enumerate_targets()
     collect_for_targets(targets)
+
+
+def _emit(logger_fn: Callable[[str], None] | None, message: str) -> None:
+    if logger_fn:
+        logger_fn(message)
+    else:
+        logger.info(message)
+
+
+def _safe_parse_dt(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def run_collect_prices(
+    *,
+    sku_id: str | None = None,
+    only_active: bool = True,
+    limit: int = 1000,
+    logger: Callable[[str], None] | None = None,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    ensure_schema()
+
+    capped_limit = min(int(limit), HARD_LIMIT_MAX_URLS)
+    raw_rows = list_price_targets(limit=capped_limit, sku_id=sku_id, only_active=only_active)
+    targets = [TargetUrl(**row) for row in raw_rows]
+
+    _emit(logger, f"targets: {len(targets)} (limit={capped_limit})")
+    if dry_run:
+        _emit(logger, "dry-run enabled: skipping collection")
+        return {
+            "target_count": len(targets),
+            "processed_count": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "failures": [],
+            "latest_scraped_at": None,
+            "limit": capped_limit,
+        }
+
+    failures: list[dict[str, str]] = []
+    success_count = 0
+    processed_count = 0
+    latest_scraped_at: str | None = None
+    latest_dt: datetime | None = None
+
+    for idx, target in enumerate(targets, start=1):
+        processed_count += 1
+        shop_db = _normalize_shop_for_db(target.shop)
+        _emit(logger, f"[{idx}/{len(targets)}] sku={target.sku_id} shop={shop_db} url={target.url}")
+
+        try:
+            result = collect_price(shop=target.shop, url=target.url)
+        except Exception as exc:
+            failures.append(
+                {
+                    "sku_id": target.sku_id,
+                    "shop": shop_db,
+                    "url": target.url,
+                    "stage": "collect",
+                    "error": str(exc),
+                }
+            )
+            _emit(logger, f"failed collect: {target.url} ({exc})")
+            continue
+
+        try:
+            persist_result(target, result)
+            success_count += 1
+            _emit(
+                logger,
+                f"saved price sku={target.sku_id} shop={shop_db} price_jpy={result.price_jpy}",
+            )
+            parsed_dt = _safe_parse_dt(result.scraped_at)
+            if parsed_dt:
+                if latest_dt is None or parsed_dt > latest_dt:
+                    latest_dt = parsed_dt
+                    latest_scraped_at = result.scraped_at
+        except Exception as exc:
+            failures.append(
+                {
+                    "sku_id": target.sku_id,
+                    "shop": shop_db,
+                    "url": target.url,
+                    "stage": "persist",
+                    "error": str(exc),
+                }
+            )
+            _emit(logger, f"failed persist: {target.url} ({exc})")
+            continue
+
+    return {
+        "target_count": len(targets),
+        "processed_count": processed_count,
+        "success_count": success_count,
+        "failure_count": len(failures),
+        "failures": failures,
+        "latest_scraped_at": latest_scraped_at,
+        "limit": capped_limit,
+    }
 
 
 if __name__ == "__main__":
