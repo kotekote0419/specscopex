@@ -818,17 +818,17 @@ def upsert_fx_rates(
         return
 
     with _connect() as conn:
-        conn.executemany(
-            """
-            INSERT INTO fx_rates (date, base, quote, rate, source, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT(date, base, quote) DO UPDATE SET
-                rate = EXCLUDED.rate,
-                source = EXCLUDED.source
-            """,
-            rows,
-        )
-
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO fx_rates (date, base, quote, rate, source, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT(date, base, quote) DO UPDATE SET
+                    rate = EXCLUDED.rate,
+                    source = EXCLUDED.source
+                """,
+                rows,
+            )
 
 def get_fx_rates(
     base: str, quote: str, start_date: str, end_date: str
